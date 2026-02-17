@@ -1,0 +1,3562 @@
+import 'package:flutter/material.dart';
+import 'package:sch_parents_diary/src/utils/hardware_utils.dart';
+import 'package:syncfusion_flutter_xlsio/xlsio.dart' hide Column, Row, Border;
+import 'package:sch_parents_diary/src/utils/responsive_text_extension.dart';
+
+import '../../constants/text_strings.dart';
+import '../../model/security/sec_user_file_static.dart';
+import '../../model/study_plan/hmw_home_work_mas.dart';
+import '../../model/study_plan/hmw_home_work_dtl.dart';
+import '../../model/study_plan/pln_weekly_plan.dart';
+import '../../platform_impl/plat_save.dart';
+import '../../utils/gen_utils.dart';
+import '../../utils/list_of_values.dart';
+import '../../utils/show_filtered_list.dart';
+import '../../web_service/api_calls.dart';
+import '../../widgets/lov_field_widget.dart';
+import '../../utils/show_alert_dialog.dart';
+
+class HmwHomeWorkMasPage extends StatefulWidget {
+  const HmwHomeWorkMasPage({super.key});
+
+  @override
+  State<HmwHomeWorkMasPage> createState() => _HmwHomeWorkMasState();
+}
+
+class _HmwHomeWorkMasState extends State<HmwHomeWorkMasPage> {
+  bool lovLoading = false;
+  TextStyle? currTextStyle;
+  final List<Option> _classSubjectOptions = [];
+  bool unitLovLoading = false;
+  String _unitLovKey = '';
+  final List<Option> _unitOptions = [];
+  final List<Option> _lessonOptions = [];
+  final List<Option> _studentOptions = [];
+  final Map<String, TextEditingController> _notesControllers = {};
+  bool loadingStudentsLov = false;
+  static const List<Map<String, String>> _studentLovHeaders = [
+    {
+      "col_field1": 'KEY',
+      "col_header1": 'رقم الطالب',
+      "col_width": '1',
+      "affected_col": "",
+      "list_title": 'قائمة الطلاب',
+    },
+    {
+      "col_field1": 'ID',
+      "col_header1": 'رقم الطالب',
+      "col_width": '200',
+      "affected_col": "",
+      "list_title": 'قائمة الطلاب',
+    },
+    {
+      "col_field2": 'LABEL',
+      "col_header2": 'اسم الطالب',
+      "col_width": '360',
+      "affected_col": "",
+      "list_title": 'قائمة الطلاب',
+    },
+  ];
+
+  final TextEditingController _schoolIdController = TextEditingController();
+  final TextEditingController _semesterIdController = TextEditingController();
+  final TextEditingController _classIdController = TextEditingController();
+  final TextEditingController _branchIdController = TextEditingController();
+  final TextEditingController _sectionIdController = TextEditingController();
+  final TextEditingController _subjectIdController = TextEditingController();
+
+  final TextEditingController _fromShouldDateCtrl = TextEditingController();
+  final TextEditingController _toShouldDateCtrl = TextEditingController();
+
+  String _semesterFromDate = '';
+  String _semesterToDate = '';
+
+  bool initLoading = false;
+  bool initDone = false;
+
+  Option? _classSubject;
+
+  List<HmwHomeWorkMas> _hmwHomeWorkMas = [];
+  List<HmwHomeWorkMas> _hmwHomeWorkMasFiltered = [];
+  List<HmwHomeWorkDtl> _hmwHomeWorkDtlFiltered = [];
+  List<HmwHomeWorkDtl> _hmwHomeWorkDtl = [];
+  List<PlnWeeklyPlan> _plnWeeklyPlanList = [];
+  final List<Option> _allStudentsCache = [];
+
+  HmwHomeWorkMas? _selectedMas;
+  HmwHomeWorkDtl? _selectedDtl;
+
+  Future<void> getStudentNamesLike() async {
+    final studyYear = SecUserFileStatic.webCurrentYear;
+    final schoolId = _schoolIdController.text.trim();
+    final classId = _classIdController.text.trim();
+    final branchId = _branchIdController.text.trim();
+    final sectionId = _sectionIdController.text.trim();
+
+    if (classId.isEmpty || branchId.isEmpty) return;
+
+    await APICalls.postAPI(
+      methodName: 'GenService.asmx/GetStudentNamesLike',
+      postBody: {
+        'pUserSeq': '${SecUserFileStatic.userSeq}',
+        'pLangId': '',
+        'pHashedColumn': '${SecUserFileStatic.hashedColumn}',
+        'pPathName': 'HmwHomeWorkMasPage',
+        'pStudyYear': studyYear,
+        'pStudentName': '',
+        'pSchoolId': schoolId,
+        'pClassId': classId,
+        'pBranchId': branchId,
+        'pSectionId': sectionId,
+      },
+    ).then((value) {
+      if (!mounted) return;
+
+      _allStudentsCache.clear();
+
+      if (value['ReturnValuesList'] == null ||
+          value['ReturnValuesList'].isEmpty) return;
+      if (value['ReturnValuesList'][0]["VALUE1"].toString() != '0') return;
+      if (value['SchStudentCardYearList'] == null) return;
+
+      for (final row in value['SchStudentCardYearList']) {
+        final ats = (row['ATS_STUDENT_ID'] ?? '').toString().trim();
+        final familyId = (row['FAMILY_ID'] ?? '').toString().padLeft(3, '0');
+        final studentId = (row['STUDENT_ID'] ?? '').toString().padLeft(2, '0');
+        final name = (row['STUDENT_NAME'] ?? '').toString().trim();
+        if (ats.isEmpty) continue;
+        _allStudentsCache.add(Option(
+          hiddenKey: '$familyId$studentId',
+          lovId: '$familyId$studentId',
+          lovLabel: name,
+        ));
+      }
+    }).catchError((e) {
+      if (!mounted) return;
+      _allStudentsCache.clear();
+    });
+  }
+
+  void _addStudentToSelectedMas(Option picked) {
+    if (_selectedMas == null) return;
+
+    final ats = picked.hiddenKey.toString().trim();
+    if (ats.isEmpty) return;
+
+    //Check if student already added
+    if (_hmwHomeWorkDtlFiltered.any((d) {
+      final familyId = (d.familyId?.newValue ?? '').toString().trim();
+      final studentId = (d.studentId?.newValue ?? '').toString().trim();
+      return '${familyId}${studentId}' == ats;
+    })) {
+      GenUtils.showAlertDialog(
+        message: 'هذا الطالب مضاف مسبقاً',
+        title: genAlertTitle,
+        popAfter: '0',
+        context: context,
+      );
+      return;
+    }
+
+    String familyId = '';
+    String studentId = ats;
+    if (ats.length >= 3) {
+      studentId = ats.substring(ats.length - 2);
+      familyId = ats.substring(0, ats.length - 2);
+    }
+
+    final mas = _selectedMas!;
+    final newDtl = HmwHomeWorkDtl();
+    newDtl.homeWorkSeq?.newValue = mas.homeWorkSeq?.newValue ?? '';
+    newDtl.homeWorkSeq?.oldValue = mas.homeWorkSeq?.oldValue ?? '';
+    newDtl.weeklyPlanSeq?.newValue = mas.weeklyPlanSeq?.newValue ?? '';
+    newDtl.weeklyPlanSeq?.oldValue = mas.weeklyPlanSeq?.oldValue ?? '';
+    newDtl.studyYear?.newValue = mas.studyYear?.newValue ?? '';
+    newDtl.studyYear?.oldValue = mas.studyYear?.oldValue ?? '';
+    newDtl.semesterId?.newValue = mas.semesterId?.newValue ?? '';
+    newDtl.semesterId?.oldValue = mas.semesterId?.oldValue ?? '';
+    newDtl.schoolId?.newValue = mas.schoolId?.newValue ?? '';
+    newDtl.schoolId?.oldValue = mas.schoolId?.oldValue ?? '';
+    newDtl.classId?.newValue = mas.classId?.newValue ?? '';
+    newDtl.classId?.oldValue = mas.classId?.oldValue ?? '';
+    newDtl.branchId?.newValue = mas.branchId?.newValue ?? '';
+    newDtl.branchId?.oldValue = mas.branchId?.oldValue ?? '';
+    newDtl.sectionId?.newValue = mas.sectionId?.newValue ?? '';
+    newDtl.sectionId?.oldValue = mas.sectionId?.oldValue ?? '';
+    newDtl.companyId?.newValue = mas.companyId?.newValue ?? '1';
+    newDtl.companyId?.oldValue = mas.companyId?.oldValue ?? '1';
+    newDtl.teacherId?.newValue = mas.teacherId?.newValue ?? '';
+    newDtl.teacherId?.oldValue = mas.teacherId?.oldValue ?? '';
+    newDtl.subjectId?.newValue = mas.subjectId?.newValue ?? '';
+    newDtl.subjectId?.oldValue = mas.subjectId?.oldValue ?? '';
+    newDtl.initDate?.newValue = mas.initDate?.newValue ?? '';
+    newDtl.initDate?.oldValue = mas.initDate?.oldValue ?? '';
+    newDtl.shouldDate?.newValue = mas.shouldDate?.newValue ?? '';
+    newDtl.shouldDate?.oldValue = mas.shouldDate?.oldValue ?? '';
+    newDtl.unitId?.newValue = mas.unitId?.newValue ?? '';
+    newDtl.unitId?.oldValue = mas.unitId?.oldValue ?? '';
+    newDtl.lessonId?.newValue = mas.lessonId?.newValue ?? '';
+    newDtl.lessonId?.oldValue = mas.lessonId?.oldValue ?? '';
+    newDtl.taskDetail?.newValue = mas.taskDetail?.newValue ?? '';
+    newDtl.taskDetail?.oldValue = mas.taskDetail?.oldValue ?? '';
+    newDtl.familyId?.newValue = familyId;
+    newDtl.familyId?.oldValue = familyId;
+    newDtl.studentId?.newValue = studentId;
+    newDtl.studentId?.oldValue = studentId;
+    newDtl.studentIdDesc?.newValue = picked.lovLabel;
+    newDtl.studentIdDesc?.oldValue = picked.lovLabel;
+    newDtl.transStatus?.newValue = '2';
+    newDtl.transStatus?.oldValue = newDtl.transStatus?.newValue;
+    newDtl.notes?.newValue = '';
+    newDtl.notes?.oldValue = '';
+    newDtl.userCreate?.newValue = SecUserFileStatic.userSeq;
+    newDtl.userCreate?.oldValue = SecUserFileStatic.userSeq;
+    newDtl.pcNameCreate?.newValue =
+        (HardwareUtils.deviceMAC)?.substring(0, 19) ?? '1';
+    newDtl.pcNameCreate?.oldValue =
+        (HardwareUtils.deviceMAC)?.substring(0, 19) ?? '1';
+    newDtl.ipCreate?.newValue = '127.0.0.1';
+    newDtl.ipCreate?.oldValue = '127.0.0.1';
+    newDtl.operationType = 'insert';
+
+    setState(() {
+      _hmwHomeWorkDtlFiltered.insert(0, newDtl);
+      _hmwHomeWorkDtl.add(newDtl);
+    });
+    _studentOptions.removeWhere((o) => o.hiddenKey == ats);
+  }
+
+  Future<bool> getPlnSubUnitLsn({
+    required String classId,
+    required String branchId,
+    required String subjectId,
+    required String semesterId,
+  }) async {
+    final cls = classId.trim();
+    final br = branchId.trim();
+    final sbj = subjectId.trim();
+    final sem = semesterId.trim();
+
+    if (cls.isEmpty || br.isEmpty || sbj.isEmpty || sem.isEmpty) {
+      GenUtils.showAlertDialog(
+        message: 'يرجى اختيار الفصل والصف والفرع والمادة أولاً',
+        title: genAlertTitle,
+        popAfter: '0',
+        context: context,
+      );
+      return false;
+    }
+
+    final key = '$sem|$cls|$br|$sbj';
+    if (_unitLovKey == key &&
+        _unitOptions.isNotEmpty &&
+        _lessonOptions.isNotEmpty) {
+      return true;
+    }
+
+    if (unitLovLoading) return false;
+    unitLovLoading = true;
+
+    showAlertDialog(context);
+    // Fetch units and lessons filtered by the selected semester
+    // The API will return only units and lessons that belong to the specified semester
+    return APICalls.postAPI(
+      methodName: 'PlanService.asmx/GetPlnSubUnitLsn',
+      postBody: {
+        'pUserSeq': '${SecUserFileStatic.userSeq}',
+        'pHashedColumn': '${SecUserFileStatic.hashedColumn}',
+        'pPathName': 'HmwHomeWorkMasPage',
+        'pStudyYear': SecUserFileStatic.webCurrentYear,
+        'pSemesterId': sem,
+        'pClassId': cls,
+        'pBranchId': br,
+        'pSubjectId': sbj,
+      },
+    ).then((value) {
+      if (value['ReturnValuesList'][0]["VALUE1"].toString() != '0') {
+        final errorText = value['ReturnValuesList'][0]["VALUE1"].toString();
+        GenUtils.showAlertDialog(
+          message: errorText,
+          title: genErrorTitle,
+          popAfter: '0',
+          context: context,
+        );
+        return false;
+      }
+
+      final units = <Option>[];
+      final lessons = <Option>[];
+
+      final unitList = (value['SchPlnSubUnitList'] as List<dynamic>?) ?? [];
+      for (final row in unitList) {
+        final unitId = (row['UNIT_ID'] ?? '').toString().trim();
+        if (unitId.isEmpty) continue;
+        final unitDesc =
+            (row['UNIT_DESC'] ?? row['UNIT_DESC_S'] ?? '').toString().trim();
+        final label =
+            unitDesc.isNotEmpty ? '$unitId - $unitDesc' : 'الوحدة $unitId';
+        units.add(Option(
+          hiddenKey: unitId,
+          lovId: unitId,
+          lovLabel: label,
+        ));
+      }
+
+      final lessonList =
+          (value['SchPlnSubUnitLsnList'] as List<dynamic>?) ?? [];
+      for (final row in lessonList) {
+        final unitId = (row['UNIT_ID'] ?? '').toString().trim();
+        final lessonId = (row['LESSON_ID'] ?? '').toString().trim();
+        if (unitId.isEmpty || lessonId.isEmpty) continue;
+        final lessonDesc = (row['LESSON_DESC'] ?? row['LESSON_DESC_S'] ?? '')
+            .toString()
+            .trim();
+        final label = lessonDesc.isNotEmpty
+            ? '$lessonId - $lessonDesc'
+            : 'الدرس $lessonId';
+        lessons.add(Option(
+          hiddenKey: lessonId,
+          lovId: lessonId,
+          lovLabel: label,
+          addedValue2: unitId,
+        ));
+      }
+
+      setState(() {
+        _unitLovKey = key;
+        _unitOptions
+          ..clear()
+          ..addAll(units..sort((a, b) => a.hiddenKey.compareTo(b.hiddenKey)));
+        _lessonOptions
+          ..clear()
+          ..addAll(lessons..sort((a, b) => a.hiddenKey.compareTo(b.hiddenKey)));
+      });
+
+      if (_unitOptions.isEmpty || _lessonOptions.isEmpty) {
+        GenUtils.showAlertDialog(
+          message: alertNoDataToView,
+          title: genAlertTitle,
+          popAfter: '0',
+          context: context,
+        );
+        return false;
+      }
+
+      return true;
+    }).catchError((e) {
+      GenUtils.showAlertDialog(
+        message: 'Error: $e',
+        title: genErrorTitle,
+        popAfter: '0',
+        context: context,
+      );
+      return false;
+    }).whenComplete(() {
+      unitLovLoading = false;
+      if (mounted) Navigator.pop(context);
+    });
+  }
+
+  /// Fetches school, teacher, and subject information for the current user
+  /// Populates class/subject dropdown options and determines the current semester
+  Future<void> getSchEmpSubject() async {
+    // Guard clause: prevent multiple simultaneous requests
+    if (lovLoading) return;
+    lovLoading = true;
+
+    // Show loading dialog to user
+    showAlertDialog(context);
+    
+    // Call API to get teacher's school, employee, and subject data
+    APICalls.postAPI(
+      methodName: 'StudentFeeding.asmx/GetSchEmpSubject',
+      postBody: {
+        'pWebCurrentYear': '1',
+        'pEmpId': '${SecUserFileStatic.empId}',  // Current logged-in teacher
+        'pIsActive': '1',  // Only active subjects
+      },
+    ).then((teacherValue) {
+      // Safety check: ensure widget is still mounted before updating state
+      if (!mounted) return;
+
+      // Check API response status - VALUE1 of 0 means success
+      if (teacherValue['ReturnValuesList'][0]["VALUE1"].toString() != '0') {
+        final errorText =
+            teacherValue['ReturnValuesList'][0]["VALUE1"].toString();
+        // Display error message if API call failed
+        GenUtils.showAlertDialog(
+          message: errorText,
+          title: genErrorTitle,
+          popAfter: '0',
+          context: context,
+        );
+        return;
+      }
+
+      /// ===== STEP 1: Build Class/Subject Dropdown Options =====
+      final List<Option> classSubjectOptions = [];
+      String? defaultSemesterId;
+      // Track seen class codes to avoid duplicates in dropdown
+      final seenClassCodes = <String>{};
+
+      // Process the list of classes and subjects assigned to this teacher
+      if (teacherValue['SchMrkClsSubjectsList'] != null) {
+        for (final row in teacherValue['SchMrkClsSubjectsList']) {
+          // Extract data from API response with fallbacks
+          final classId = (row['CLASS_ID'] ?? '').toString();
+          final branchId = (row['BRANCH_ID'] ?? '').toString();
+          final subjectId = (row['SUBJECT_ID'] ?? '').toString();
+          final classDesc =
+              (row['CLASS_DESC'] ?? row['CLASS_FULL_NAME'] ?? '').toString();
+          final branchDesc = (row['BRANCH_DESC'] ?? '').toString();
+          final subjectDesc =
+              (row['SUBJECT_DESC'] ?? row['SUBJECT_FULL_NAME'] ?? '')
+                  .toString();
+          // Class code uniquely identifies a class/branch/subject combination
+          final classCode = (row['CLASS_CODE'] ?? '').toString();
+
+          // Add to dropdown only if class code is unique (not seen before)
+          // seenClassCodes.add() returns true only if the code was new
+          if (classCode.isNotEmpty && seenClassCodes.add(classCode)) {
+            final label = (row['SUBJECT_FULL_NAME'] ?? '').toString();
+            // Build fallback subject display name if description is empty
+            final fallbackSubject =
+                subjectDesc.isEmpty ? 'المادة $subjectId' : subjectDesc;
+            // Use description if available, otherwise use ID
+            final labelClass = classDesc.isEmpty ? classId : classDesc;
+            final labelBranch = branchDesc.isEmpty ? branchId : branchDesc;
+            
+            // Create Option object for dropdown
+            // hiddenKey: stores the class code for identification
+            // lovLabel: display text shown to user in dropdown
+            classSubjectOptions.add(Option(
+              hiddenKey: classCode,  // Used to identify selection
+              lovId: classCode,
+              // Show subject full name if available, else build descriptive label
+              lovLabel: label.isNotEmpty
+                  ? label
+                  : 'الصف $labelClass / الفرع $labelBranch - $fallbackSubject',
+              addedValue2: subjectDesc,  // Store subject description for later use
+            ));
+          }
+        }
+      }
+
+      /// ===== STEP 2: Determine Current Semester =====
+      // Process semester list to find the current semester and its date range
+      if (teacherValue['PlnSemestersList'] != null &&
+          teacherValue['PlnSemestersList'] is List &&
+          teacherValue['PlnSemestersList'].isNotEmpty) {
+        // Get today's date for semester comparison
+        final today = DateTime.now();
+
+        // Iterate through all available semesters
+        for (final semRow in teacherValue['PlnSemestersList']) {
+          try {
+            // Extract semester ID (e.g., '1', '2')
+            final semValue = (semRow['MEMBER_VALUE'] ?? '').toString().trim();
+
+            // Skip if semester ID is empty
+            if (semValue.isEmpty) {
+              continue;
+            }
+
+            // Extract start and end dates for this semester
+            // API may use different field name formats, so check multiple variations
+            String fromDateStr = '';
+            String toDateStr = '';
+
+            // Loop through all keys in response to find date fields (case-insensitive)
+            for (final key in semRow.keys) {
+              final keyLower = key.toString().toLowerCase();
+              // Match fields containing 'from' and 'date' (e.g., 'FROM_DATE', 'fromDate')
+              if (keyLower.contains('from') && keyLower.contains('date')) {
+                fromDateStr = (semRow[key] ?? '').toString().trim();
+              }
+              // Match fields containing 'to' and 'date' (e.g., 'TO_DATE', 'toDate')
+              if (keyLower.contains('to') && keyLower.contains('date')) {
+                toDateStr = (semRow[key] ?? '').toString().trim();
+              }
+            }
+
+            // Only proceed if both start and end dates were found
+            if (fromDateStr.isNotEmpty && toDateStr.isNotEmpty) {
+              try {
+                // Parse date strings to DateTime objects
+                final from = DateTime.parse(fromDateStr);
+                final to = DateTime.parse(toDateStr);
+
+                // Check if today falls within this semester's date range
+                // Adding/subtracting 1 day to include boundary dates
+                if (today.isAfter(from.subtract(const Duration(days: 1))) &&
+                    today.isBefore(to.add(const Duration(days: 1)))) {
+                  // Found the current semester - store its ID and dates
+                  defaultSemesterId = semValue;
+                  _semesterFromDate = fromDateStr;
+                  _semesterToDate = toDateStr;
+
+                  break; // Exit loop - no need to check other semesters
+                }
+              } catch (dateError) {
+                // Date parsing failed - continue to next semester
+                continue;
+              }
+            } else {
+              // If dates are not available for this semester, skip it
+            }
+          } catch (e) {
+            // Skip any semester with errors and continue to next
+            continue;
+          }
+        }
+
+        // Fallback: if no current semester was found, use the first one in the list
+        if ((defaultSemesterId ?? '').trim().isEmpty) {
+          defaultSemesterId =
+              (teacherValue['PlnSemestersList'][0]['MEMBER_VALUE'] ?? '')
+                  .toString();
+        }
+      }
+
+      /// ===== STEP 3: Update UI with New Data =====
+      setState(() {
+        // Update class/subject dropdown options
+        _classSubjectOptions
+          ..clear()  // Remove old options
+          ..addAll(classSubjectOptions
+            ..sort((a, b) => a.hiddenKey.compareTo(b.hiddenKey)));  // Sort alphabetically
+        
+        // Auto-select the current semester only if no semester is already selected
+        // This prevents overwriting user's previous selection on page reload
+        if (_semesterIdController.text.trim().isEmpty &&
+            (defaultSemesterId ?? '').trim().isNotEmpty) {
+          _semesterIdController.text = defaultSemesterId!.trim();
+        }
+      });
+    }).catchError((e) {
+      // Handle any API or network errors
+      if (!mounted) return;
+      GenUtils.showAlertDialog(
+        message: 'Error: $e',
+        title: genErrorTitle,
+        popAfter: '0',
+        context: context,
+      );
+    }).whenComplete(() {
+      // Always called when API request completes (success or error)
+      lovLoading = false;
+      // Close loading dialog
+      if (mounted) Navigator.pop(context);
+    });
+  }
+
+  @override
+  void initState() {
+    super.initState();
+
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      getSchEmpSubject();
+    });
+  }
+
+  @override
+  void dispose() {
+    _schoolIdController.dispose();
+    _semesterIdController.dispose();
+    _classIdController.dispose();
+    _branchIdController.dispose();
+    _sectionIdController.dispose();
+    _subjectIdController.dispose();
+    _fromShouldDateCtrl.dispose();
+    _toShouldDateCtrl.dispose();
+    for (final ctrl in _notesControllers.values) {
+      ctrl.dispose();
+    }
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final Size screenSize = MediaQuery.of(context).size;
+    final double screenWidth = screenSize.width;
+
+    if (screenWidth >= 1260) {
+      currTextStyle = context.webFontBody;
+    } else if (screenWidth <= 580) {
+      currTextStyle = context.mobileFontBody;
+    } else {
+      currTextStyle = context.tabletFontBody;
+    }
+
+    return Scaffold(
+        appBar: AppBar(
+          title: Text('إضافة و متابعة الواجبات الكتابية', style: currTextStyle),
+          backgroundColor: Colors.blue,
+          foregroundColor: Colors.white,
+          actions: [
+            IconButton(
+              onPressed: () => exportToExcel(),
+              icon: const Icon(Icons.add_chart_outlined),
+              tooltip: tExportToExcel,
+            ),
+          ],
+        ),
+        body: Directionality(
+          textDirection: TextDirection.rtl,
+          child: Column(
+              children: [
+                header(context),
+                const SizedBox(height: 8),
+                Expanded(
+                  child: Row(
+                    children: [
+                      Expanded(
+                        flex: 1,
+                        child: Column(
+                          children: [
+                            Container(
+                              padding: const EdgeInsets.all(12.0),
+                              decoration: BoxDecoration(
+                                color: Colors.blue[50],
+                                border: Border(
+                                    bottom:
+                                        BorderSide(color: Colors.grey[300]!)),
+                              ),
+                              child: Row(
+                                mainAxisAlignment:
+                                    MainAxisAlignment.spaceBetween,
+                                children: [
+                                  Row(
+                                    children: [
+                                      const Icon(Icons.assignment,
+                                          size: 20, color: Colors.blue),
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        'قائمة الواجبات',
+                                        style: currTextStyle,
+                                      ),
+                                    ],
+                                  ),
+                                  Wrap(
+                                    spacing: 8,
+                                    children: [
+                                      ElevatedButton.icon(
+                                        onPressed: _classIdController.text
+                                                    .trim()
+                                                    .isNotEmpty &&
+                                                _branchIdController.text
+                                                    .trim()
+                                                    .isNotEmpty &&
+                                                _subjectIdController.text
+                                                    .trim()
+                                                    .isNotEmpty
+                                            ? () => showMasForm(
+                                                operationType: 'insert')
+                                            : null,
+                                        icon: const Icon(Icons.add, size: 18),
+                                        label: const Text(
+                                            'إضافة واجب من الخطة الأسبوعية'),
+                                        style: ElevatedButton.styleFrom(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 12, vertical: 8),
+                                          backgroundColor: Colors.blue,
+                                          foregroundColor: Colors.white,
+                                        ),
+                                      ),
+                                      ElevatedButton.icon(
+                                        onPressed: _classIdController.text
+                                                    .trim()
+                                                    .isNotEmpty &&
+                                                _branchIdController.text
+                                                    .trim()
+                                                    .isNotEmpty &&
+                                                _subjectIdController.text
+                                                    .trim()
+                                                    .isNotEmpty
+                                            ? () => showMasForm(
+                                                  operationType: 'insert',
+                                                  manualUnitLesson: true,
+                                                )
+                                            : null,
+                                        icon: const Icon(Icons.edit_note,
+                                            size: 18),
+                                        label: const Text('إضافة واجب يدويا'),
+                                        style: ElevatedButton.styleFrom(
+                                          padding: const EdgeInsets.symmetric(
+                                              horizontal: 12, vertical: 8),
+                                          backgroundColor: Colors.blueGrey,
+                                          foregroundColor: Colors.white,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ],
+                              ),
+                            ),
+                            Expanded(
+                              child: ListView.builder(
+                                itemCount: _hmwHomeWorkMasFiltered.length,
+                                itemBuilder: (context, index) {
+                                  final item = _hmwHomeWorkMasFiltered[index];
+                                  final isSel = _selectedMas == item;
+
+                                  return Card(
+                                    margin: const EdgeInsets.symmetric(
+                                        horizontal: 8, vertical: 4),
+                                    color: isSel ? Colors.blue[100] : null,
+                                    child: ListTile(
+                                      leading: CircleAvatar(
+                                        backgroundColor: Colors.blue[700],
+                                        child: Text(
+                                          (item.homeWorkSeq?.newValue ?? '')
+                                                  .toString()
+                                                  .isEmpty
+                                              ? '#'
+                                              : (item.homeWorkSeq?.newValue ??
+                                                      '')
+                                                  .toString(),
+                                          style: currTextStyle?.copyWith(
+                                            color: Colors.white,
+                                          ),
+                                        ),
+                                      ),
+                                      title: Text(
+                                        (item.taskDetail?.newValue ?? '')
+                                            .toString(),
+                                        maxLines: 1,
+                                        overflow: TextOverflow.ellipsis,
+                                        style: currTextStyle,
+                                      ),
+                                      subtitle: Column(
+                                        crossAxisAlignment:
+                                            CrossAxisAlignment.start,
+                                        children: [
+                                          Text(
+                                              'التاريخ المطلوب: ${(item.shouldDate?.newValue ?? '').toString()}'),
+                                          Text(
+                                              'المادة: ${(item.subjectIdDesc?.newValue ?? '').toString()}'),
+                                          Builder(
+                                            builder: (context) {
+                                              final unitId =
+                                                  (item.unitId?.newValue ?? '')
+                                                      .toString()
+                                                      .trim();
+                                              final lessonId =
+                                                  (item.lessonId?.newValue ??
+                                                          '')
+                                                      .toString()
+                                                      .trim();
+                                              final isManual = unitId.isEmpty ||
+                                                  lessonId.isEmpty;
+
+                                              if (isManual) {
+                                                final unitDesc =
+                                                    (item.unitDesc?.newValue ??
+                                                            '')
+                                                        .toString();
+                                                final lessonDesc = (item
+                                                            .lessonDesc
+                                                            ?.newValue ??
+                                                        '')
+                                                    .toString();
+                                                return Text(
+                                                    'الوحدة/الدرس: $unitDesc / $lessonDesc');
+                                              } else {
+                                                final unitIdDesc = (item
+                                                            .unitIdDesc
+                                                            ?.newValue ??
+                                                        '')
+                                                    .toString();
+                                                final lessonIdDesc = (item
+                                                            .lessonIdDesc
+                                                            ?.newValue ??
+                                                        '')
+                                                    .toString();
+                                                return Text(
+                                                    'الوحدة/الدرس: $unitIdDesc / $lessonIdDesc');
+                                              }
+                                            },
+                                          ),
+                                        ],
+                                      ),
+                                      onTap: () async {
+                                        setState(() {
+                                          _selectedMas = item;
+                                          _selectedDtl = null;
+                                          _studentOptions.clear();
+                                        });
+                                        //Filter detail list for selected master
+                                        final seq =
+                                            (item.homeWorkSeq?.newValue ?? '')
+                                                .toString()
+                                                .trim();
+                                        final weekly =
+                                            (item.weeklyPlanSeq?.newValue ?? '')
+                                                .toString()
+                                                .trim();
+                                        setState(() {
+                                          _hmwHomeWorkDtlFiltered =
+                                              _hmwHomeWorkDtl.where((d) {
+                                            final dSeq =
+                                                (d.homeWorkSeq?.newValue ?? '')
+                                                    .toString()
+                                                    .trim();
+                                            final dWeekly =
+                                                (d.weeklyPlanSeq?.newValue ??
+                                                        '')
+                                                    .toString()
+                                                    .trim();
+                                            if (seq.isNotEmpty && dSeq != seq)
+                                              return false;
+                                            if (weekly.isNotEmpty &&
+                                                dWeekly != weekly) return false;
+                                            return true;
+                                          }).toList();
+                                          _selectedDtl = null;
+                                        });
+                                        setState(() {
+                                          _studentOptions.clear();
+                                          for (final student in _allStudentsCache) {
+                                            final ats = student.hiddenKey.toString().trim();
+                                            if (_hmwHomeWorkDtlFiltered.any((d) {
+                                              final familyId = (d.familyId?.newValue ?? '').toString().trim();
+                                              final studentId = (d.studentId?.newValue ?? '').toString().trim();
+                                              return '${familyId}${studentId}' == ats;
+                                            })) continue;
+                                            _studentOptions.add(student);
+                                          }
+                                          loadingStudentsLov = false;
+                                        });
+                                      },
+                                      trailing: PopupMenuButton(
+                                        itemBuilder: (context) => [
+                                          PopupMenuItem(
+                                            value: 'edit',
+                                            child: Row(
+                                              children: [
+                                                const Icon(Icons.edit, size: 18),
+                                                const SizedBox(width: 8),
+                                                Text(tEditRecord, style: currTextStyle,),
+                                              ],
+                                            ),
+                                          ),
+                                          PopupMenuItem(
+                                            value: 'delete',
+                                            child: Row(
+                                              children: [
+                                                const Icon(Icons.delete,
+                                                    size: 18,
+                                                    color: Colors.red),
+                                                const SizedBox(width: 8),
+                                                Text(
+                                                  tDeleteRecord,
+                                                  style: currTextStyle,
+                                                ),
+                                              ],
+                                            ),
+                                          ),
+                                        ],
+                                        onSelected: (v) {
+                                          if (v == 'edit') {
+                                            showMasForm(
+                                                item: item,
+                                                operationType: 'update');
+                                          } else if (v == 'delete') {
+                                            deleteMasItem(item);
+                                          }
+                                        },
+                                      ),
+                                    ),
+                                  );
+                                },
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                      Expanded(
+                        flex: 1,
+                        child: Container(
+                          decoration: BoxDecoration(
+                            border: Border(
+                                right: BorderSide(color: Colors.grey[300]!)),
+                          ),
+                          child: Column(
+                            children: [
+                              Container(
+                                padding: const EdgeInsets.all(12.0),
+                                decoration: BoxDecoration(
+                                  color: Colors.green[50],
+                                  border: Border(
+                                      bottom:
+                                          BorderSide(color: Colors.grey[300]!)),
+                                ),
+                                child: Row(
+                                  children: [
+                                    const Icon(Icons.people_alt,
+                                        color: Colors.green),
+                                    const SizedBox(width: 8),
+                                    Text(
+                                      _selectedMas == null
+                                          ? 'تفاصيل الطلاب الذين لم يحلوا الواجب'
+                                          : 'تفاصيل الطلاب الذين لم يحلوا الواجب (${(_selectedMas!.subjectIdDesc?.newValue ?? '').toString()})',
+                                      style: currTextStyle,
+                                    ),
+                                  ],
+                                ),
+                              ),
+                              if (_selectedMas != null)
+                                Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                      horizontal: 12, vertical: 8),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
+                                        child: LovFieldWidget(
+                                          label: 'إضافة طالب',
+                                          enabled: true,
+                                          valueText: '',
+                                          options: _studentOptions,
+                                          headers: _studentLovHeaders,
+                                          title: 'قائمة الطلاب',
+                                          isMandatory: true,
+                                          hintText: loadingStudentsLov
+                                              ? 'جاري تحميل الطلاب...'
+                                              : (_studentOptions.isEmpty
+                                                  ? 'لا يوجد طلاب'
+                                                  : 'اختر الطالب'),
+                                          onChanged: (picked) {
+                                            if (picked == null) return;
+                                            _addStudentToSelectedMas(picked);
+                                            updHmwHomeWorkDtl(
+                                                showEmptyAlert: false);
+                                          },
+                                        ),
+                                      ),
+                                      const SizedBox(width: 8),
+                                        ElevatedButton.icon(
+                                        onPressed: () async {
+                                          final rows = _studentOptions
+                                            .map((o) => LovRow({
+                                              "KEY":
+                                                o.hiddenKey.toString(),
+                                              "ID":
+                                                (o.lovId ?? '').toString(),
+                                              "LABEL":
+                                                o.lovLabel.toString(),
+                                              "addedValue2":
+                                                (o.addedValue2 ?? '')
+                                                  .toString(),
+                                              "addedValue3":
+                                                (o.addedValue3 ?? '')
+                                                  .toString(),
+                                              "addedValue4":
+                                                (o.addedValue4 ?? '')
+                                                  .toString(),
+                                              }))
+                                            .toList();
+
+                                          final returnedValues =
+                                            await showFilteredList(
+                                          context: context,
+                                          listMainSourceData: rows,
+                                          objectOfHeadersToView:
+                                            _studentLovHeaders,
+                                          );
+
+                                          if (returnedValues.isEmpty) return;
+
+                                          final pickedKey = returnedValues[0]
+                                            .values
+                                            .elementAt(0)
+                                            .toString();
+                                          Option picked;
+                                          try {
+                                          picked = _studentOptions.firstWhere(
+                                            (o) =>
+                                              o.hiddenKey.toString() ==
+                                              pickedKey,
+                                          );
+                                          } catch (_) {
+                                          final pickedLabel =
+                                            returnedValues.length > 2
+                                              ? returnedValues[2]
+                                                .values
+                                                .elementAt(0)
+                                                .toString()
+                                              : '';
+                                          final pickedIdDisplay =
+                                            returnedValues.length > 1
+                                              ? returnedValues[1]
+                                                .values
+                                                .elementAt(0)
+                                                .toString()
+                                              : '';
+                                          picked = Option(
+                                            hiddenKey: pickedKey,
+                                            lovLabel: pickedLabel,
+                                            lovId: pickedIdDisplay,
+                                          );
+                                          }
+
+                                          _addStudentToSelectedMas(picked);
+                                          await updHmwHomeWorkDtl(
+                                            showEmptyAlert: false);
+                                        },
+                                        icon: const Icon(Icons.person_add),
+                                        label: const Text('إضافة'),
+                                        ),
+                                    ],
+                                  ),
+                                ),
+                              Expanded(
+                                child: _selectedMas == null
+                                    ? Center(
+                                        child: Column(
+                                          mainAxisAlignment:
+                                              MainAxisAlignment.center,
+                                          children: [
+                                            const Icon(Icons.arrow_forward,
+                                                size: 64, color: Colors.grey),
+                                            const SizedBox(height: 16),
+                                            Text(
+                                              'اختر واجب من القائمة لعرض تفاصيل الطلاب',
+                                              style: currTextStyle,
+                                            ),
+                                          ],
+                                        ),
+                                      )
+                                    : ListView.builder(
+                                        itemCount:
+                                            _hmwHomeWorkDtlFiltered.length,
+                                        itemBuilder: (context, index) {
+                                          final item =
+                                              _hmwHomeWorkDtlFiltered[index];
+                                          final isSel = _selectedDtl == item;
+
+                                          String currentStatus =
+                                              (item.transStatus?.newValue ?? '')
+                                                  .toString()
+                                                  .trim();
+                                          if (currentStatus.isEmpty) {
+                                            currentStatus = '2';
+                                          }
+
+                                            final notesKey =
+                                                '${(item.homeWorkSeq?.newValue ?? '').toString().trim()}|${(item.familyId?.newValue ?? '').toString().trim()}|${(item.studentId?.newValue ?? '').toString().trim()}';
+                                            final notesText =
+                                                (item.notes?.newValue ?? '')
+                                                    .toString();
+                                            final notesCtrl =
+                                                _notesControllers.putIfAbsent(
+                                              notesKey,
+                                              () => TextEditingController(
+                                                text: notesText,
+                                              ),
+                                            );
+                                            if (notesCtrl.text != notesText) {
+                                              notesCtrl.text = notesText;
+                                            }
+                                          final familyId =
+                                              (item.familyId?.newValue ?? '')
+                                                  .toString()
+                                                  .trim();
+                                          final studentId =
+                                              (item.studentId?.newValue ?? '')
+                                                  .toString()
+                                                  .trim();
+                                          final fullStudentId =
+                                             '${familyId.toString().padLeft(3, '0')}${studentId.toString().padLeft(2, '0')}';
+
+
+                                          return Card(
+                                            margin: const EdgeInsets.symmetric(
+                                                horizontal: 8, vertical: 4),
+                                            color: isSel
+                                                ? Colors.green[100]
+                                                : null,
+                                            child: Padding(
+                                              padding:
+                                                  const EdgeInsets.all(12.0),
+                                              child: Row(
+                                                crossAxisAlignment:
+                                                    CrossAxisAlignment.start,
+                                                children: [
+                                                  // Student ID Avatar
+                                                  CircleAvatar(
+                                                    backgroundColor:
+                                                        Colors.green[700],
+                                                    child: FittedBox(
+                                                      fit: BoxFit.scaleDown,
+                                                      child: Text(
+                                                        fullStudentId
+                                                                .isNotEmpty
+                                                            ? fullStudentId
+                                                            : studentId,
+                                                        style: currTextStyle
+                                                            ?.copyWith(
+                                                          color: Colors.white,
+                                                        ),
+                                                      ),
+                                                    ),
+                                                  ),
+                                                  const SizedBox(width: 12),
+                                                  // Content
+                                                  Expanded(
+                                                    child: Column(
+                                                      crossAxisAlignment:
+                                                          CrossAxisAlignment
+                                                              .start,
+                                                      children: [
+                                                        // Student Name
+                                                        Text(
+                                                          (item.studentIdDesc
+                                                                      ?.newValue ??
+                                                                  '')
+                                                              .toString(),
+                                                          style: currTextStyle,
+                                                        ),
+                                                        const SizedBox(
+                                                            height: 8),
+                                                        // Row with Dropdown and TextField
+                                                        Row(
+                                                          children: [
+                                                            // Status Dropdown
+                                                            Expanded(
+                                                              flex: 2,
+                                                              child:
+                                                                  DropdownButtonFormField<
+                                                                      String>(
+                                                                value:
+                                                                    currentStatus,
+                                                                decoration:
+                                                                    const InputDecoration(
+                                                                  labelText:
+                                                                      'الحالة',
+                                                                  isDense: true,
+                                                                  contentPadding:
+                                                                      EdgeInsets
+                                                                          .symmetric(
+                                                                    horizontal:
+                                                                        12,
+                                                                    vertical: 8,
+                                                                  ),
+                                                                ),
+                                                                items: [
+                                                                  DropdownMenuItem(
+                                                                    value: '2',
+                                                                    child: Text(
+                                                                      'غير منجز',
+                                                                      style:
+                                                                          currTextStyle,
+                                                                    ),
+                                                                  ),
+                                                                  DropdownMenuItem(
+                                                                    value: '3',
+                                                                    child: Text(
+                                                                      'منجز جزئياً',
+                                                                      style:
+                                                                          currTextStyle,
+                                                                    ),
+                                                                  ),
+                                                                ],
+                                                                onChanged:
+                                                                    (value) {
+                                                                  if (value ==
+                                                                      null)
+                                                                    return;
+
+                                                                  item.transStatus
+                                                                          ?.newValue =
+                                                                      value
+                                                                          .trim();
+                                                                  item.transStatus
+                                                                          ?.oldValue =
+                                                                      value
+                                                                          .trim();
+                                                                  item.operationType =
+                                                                      'update';
+                                                                  setState(
+                                                                      () {});
+                                                                },
+                                                              ),
+                                                            ),
+                                                            const SizedBox(
+                                                                width: 12),
+                                                            // Notes TextField
+                                                            Expanded(
+                                                              flex: 3,
+                                                              child: TextField(
+                                                                controller:
+                                                                    notesCtrl,
+                                                                style:
+                                                                    currTextStyle,
+                                                              textDirection:
+                                                                TextDirection.rtl,
+                                                              textAlign:
+                                                                TextAlign.right,
+                                                                decoration:
+                                                                    const InputDecoration(
+                                                                  labelText:
+                                                                      'ملاحظات',
+                                                                  isDense: true,
+                                                                  contentPadding:
+                                                                      EdgeInsets
+                                                                          .symmetric(
+                                                                    horizontal:
+                                                                        12,
+                                                                    vertical: 8,
+                                                                  ),
+                                                                ),
+                                                                onChanged:
+                                                                    (value) {
+                                                                  item.notes
+                                                                          ?.newValue =
+                                                                      value;
+                                                                  item.notes
+                                                                          ?.oldValue =
+                                                                      value;
+                                                                  item.operationType =
+                                                                      'update';
+                                                                  setState(
+                                                                      () {});
+                                                                },
+                                                              ),
+                                                            ),
+                                                            const SizedBox(
+                                                                width: 8),
+                                                            IconButton(
+                                                              tooltip: tSave,
+                                                              icon: Icon(
+                                                                Icons.save,
+                                                                color: item.operationType ==
+                                                                        'query'
+                                                                    ? Colors
+                                                                        .grey
+                                                                    : Colors
+                                                                        .green,
+                                                              ),
+                                                              onPressed:
+                                                                  item.operationType ==
+                                                                          'query'
+                                                                      ? null
+                                                                      : () async {
+                                                                          item.notes
+                                                                              ?.newValue = (item.notes?.newValue ??
+                                                                                  '')
+                                                                              .toString()
+                                                                              .trim();
+                                                                          item.notes
+                                                                              ?.oldValue = (item.notes?.newValue ??
+                                                                                  '')
+                                                                              .toString()
+                                                                              .trim();
+                                                                          item.userModify?.newValue =
+                                                                              SecUserFileStatic.userSeq;
+                                                                          item.userModify?.oldValue =
+                                                                              SecUserFileStatic.userSeq;
+                                                                          item.pcNameModify
+                                                                              ?.newValue = (HardwareUtils.deviceMAC)?.substring(0,
+                                                                                  19) ??
+                                                                              '1';
+                                                                          item.pcNameModify
+                                                                              ?.oldValue = (HardwareUtils.deviceMAC)?.substring(0,
+                                                                                  19) ??
+                                                                              '1';
+                                                                          item.ipModify?.newValue =
+                                                                              (SecUserFileStatic.ipModify ?? '1');
+                                                                          item.ipModify?.oldValue =
+                                                                              (SecUserFileStatic.ipModify ?? '1');
+
+                                                                          setState(
+                                                                              () {});
+                                                                          await updHmwHomeWorkDtl(
+                                                                              showEmptyAlert: false);
+                                                                        },
+                                                            ),
+                                                            const SizedBox(
+                                                                width: 4),
+                                                            IconButton(
+                                                              tooltip:
+                                                                  tDeleteRecord,
+                                                              icon: const Icon(
+                                                                Icons.delete,
+                                                                color:
+                                                                    Colors.red,
+                                                              ),
+                                                              onPressed: () =>
+                                                                  deleteDtlItem(
+                                                                      item),
+                                                            ),
+                                                          ],
+                                                        ),
+                                                      ],
+                                                    ),
+                                                  ),
+                                                ],
+                                              ),
+                                            ),
+                                          );
+                                        },
+                                      ),
+                              ),
+                            ],
+                          ),
+                        ),
+                      ),
+                    ],
+                  ),
+                )
+              ],
+            ),
+        ),
+    );
+  }
+
+  Future<void> getHmwHomeWorkMas(
+      {bool showLoading = true,
+      bool clearResults = true,
+      bool showAlerts = true}) async {
+    if (initLoading || initDone) return;
+    initLoading = true;
+
+    if (showLoading) {
+      showAlertDialog(context);
+    }
+    await APICalls.postAPI(
+      methodName: 'HmwService.asmx/GetHmwHomeWorkMas',
+      postBody: {
+        'pUserSeq': '${SecUserFileStatic.userSeq}',
+        'pHashedColumn': '${SecUserFileStatic.hashedColumn}',
+        'pPathName': 'HmwHomeWorkMasPage',
+        'pHomeWorkSeq': '0',
+        'pWeeklyPlanSeq': '0',
+        'pStudyYear': '${SecUserFileStatic.webCurrentYear}',
+        'pSchoolId': '0',
+        'pClassId': '0',
+        'pBranchId': '0',
+        'pSectionId': '0',
+        'pFromShouldDate': _fromShouldDateCtrl.text.trim(),
+        'pToShouldDate': _toShouldDateCtrl.text.trim(),
+        'pSubjectId': '0',
+        'pTeacherId': SecUserFileStatic.empId.toString(),
+      },
+    ).then((value) {
+      if (showLoading) {
+        Navigator.pop(context);
+      }
+
+      // Check for data even if there's an error message
+      final hasMasData = value['HmwHomeWorkMasList'] != null &&
+          (value['HmwHomeWorkMasList'] as List).isNotEmpty;
+      final hasWeeklyData = value['PlnWeeklyPlanList'] != null &&
+          (value['PlnWeeklyPlanList'] as List).isNotEmpty;
+
+      if (!hasMasData && !hasWeeklyData) {
+        if (showAlerts) {
+          final errorText = value['ReturnValuesList'][0]["VALUE1"].toString();
+          GenUtils.showAlertDialog(
+              message: errorText.isEmpty ? 'No data found' : errorText,
+              title: genAlertTitle,
+              popAfter: '0',
+              context: context);
+        }
+        initLoading = false;
+        return;
+      }
+
+      final list = (value['HmwHomeWorkMasList'] as List<dynamic>?) ?? [];
+      final weeklyPlanList =
+          (value['PlnWeeklyPlanList'] as List<dynamic>?) ?? [];
+      _hmwHomeWorkMas.clear();
+      _plnWeeklyPlanList.clear();
+
+      for (final row in list) {
+        final m = HmwHomeWorkMas();
+        m.homeWorkSeq?.newValue = (row["HOME_WORK_SEQ"] ?? '').toString();
+        m.homeWorkSeq?.oldValue = (row["HOME_WORK_SEQ"] ?? '').toString();
+        m.weeklyPlanSeq?.newValue = (row["WEEKLY_PLAN_SEQ"] ?? '').toString();
+        m.weeklyPlanSeq?.oldValue = (row["WEEKLY_PLAN_SEQ"] ?? '').toString();
+        m.studyYear?.newValue = (row["STUDY_YEAR"] ?? '').toString();
+        m.studyYear?.oldValue = (row["STUDY_YEAR"] ?? '').toString();
+        m.semesterId?.newValue = (row["SEMESTER_ID"] ?? '').toString();
+        m.semesterId?.oldValue = (row["SEMESTER_ID"] ?? '').toString();
+        m.schoolId?.newValue = (row["SCHOOL_ID"] ?? '').toString();
+        m.schoolId?.oldValue = (row["SCHOOL_ID"] ?? '').toString();
+        m.classId?.newValue = (row["CLASS_ID"] ?? '').toString();
+        m.classId?.oldValue = (row["CLASS_ID"] ?? '').toString();
+        m.branchId?.newValue = (row["BRANCH_ID"] ?? '').toString();
+        m.branchId?.oldValue = (row["BRANCH_ID"] ?? '').toString();
+        m.sectionId?.newValue = (row["SECTION_ID"] ?? '').toString();
+        m.sectionId?.oldValue = (row["SECTION_ID"] ?? '').toString();
+        m.companyId?.newValue = (row["COMPANY_ID"] ?? '').toString();
+        m.companyId?.oldValue = (row["COMPANY_ID"] ?? '').toString();
+        m.teacherId?.newValue = (row["TEACHER_ID"] ?? '').toString();
+        m.teacherId?.oldValue = (row["TEACHER_ID"] ?? '').toString();
+        m.subjectId?.newValue = (row["SUBJECT_ID"] ?? '').toString();
+        m.subjectId?.oldValue = (row["SUBJECT_ID"] ?? '').toString();
+        m.initDate?.newValue = (row["INIT_DATE"] ?? '').toString();
+        m.initDate?.oldValue = (row["INIT_DATE"] ?? '').toString();
+        m.shouldDate?.newValue = (row["SHOULD_DATE"] ?? '').toString();
+        m.shouldDate?.oldValue = (row["SHOULD_DATE"] ?? '').toString();
+        m.unitId?.newValue = (row["UNIT_ID"] ?? '').toString();
+        m.unitId?.oldValue = (row["UNIT_ID"] ?? '').toString();
+        m.unitDesc?.newValue = (row["UNIT_DESC"] ?? '').toString();
+        m.unitDesc?.oldValue = (row["UNIT_DESC"] ?? '').toString();
+        m.lessonId?.newValue = (row["LESSON_ID"] ?? '').toString();
+        m.lessonId?.oldValue = (row["LESSON_ID"] ?? '').toString();
+        m.lessonDesc?.newValue = (row["LESSON_DESC"] ?? '').toString();
+        m.lessonDesc?.oldValue = (row["LESSON_DESC"] ?? '').toString();
+        m.taskDetail?.newValue = (row["TASK_DETAIL"] ?? '').toString();
+        m.taskDetail?.oldValue = (row["TASK_DETAIL"] ?? '').toString();
+        m.userCreate?.newValue = (row["USER_CREATE"] ?? '').toString();
+        m.userCreate?.oldValue = (row["USER_CREATE"] ?? '').toString();
+        m.pcNameCreate?.newValue = (row["PC_NAME_CREATE"] ?? '').toString();
+        m.pcNameCreate?.oldValue = (row["PC_NAME_CREATE"] ?? '').toString();
+        m.ipCreate?.newValue = (row["IP_CREATE"] ?? '').toString();
+        m.ipCreate?.oldValue = (row["IP_CREATE"] ?? '').toString();
+        m.dateCreated?.newValue = (row["DATE_CREATED"] ?? '').toString();
+        m.dateCreated?.oldValue = (row["DATE_CREATED"] ?? '').toString();
+        m.userModify?.newValue = (row["USER_MODIFY"] ?? '').toString();
+        m.userModify?.oldValue = (row["USER_MODIFY"] ?? '').toString();
+        m.pcNameModify?.newValue = (row["PC_NAME_MODIFY"] ?? '').toString();
+        m.pcNameModify?.oldValue = (row["PC_NAME_MODIFY"] ?? '').toString();
+        m.ipModify?.newValue = (row["IP_MODIFY"] ?? '').toString();
+        m.ipModify?.oldValue = (row["IP_MODIFY"] ?? '').toString();
+        m.dateModified?.newValue = (row["DATE_MODIFIED"] ?? '').toString();
+        m.dateModified?.oldValue = (row["DATE_MODIFIED"] ?? '').toString();
+        m.lessonIdDesc?.newValue = (row["LESSON_ID_DESC"] ?? '').toString();
+        m.lessonIdDesc?.oldValue = (row["LESSON_ID_DESC"] ?? '').toString();
+        m.unitIdDesc?.newValue = (row["UNIT_ID_DESC"] ?? '').toString();
+        m.unitIdDesc?.oldValue = (row["UNIT_ID_DESC"] ?? '').toString();
+        m.subjectIdDesc?.newValue = (row["SUBJECT_ID_DESC"] ?? '').toString();
+        m.subjectIdDesc?.oldValue = (row["SUBJECT_ID_DESC"] ?? '').toString();
+        m.teacherIdDesc?.newValue = (row["TEACHER_ID_DESC"] ?? '').toString();
+        m.teacherIdDesc?.oldValue = (row["TEACHER_ID_DESC"] ?? '').toString();
+        m.schoolIdDesc?.newValue = (row["SCHOOL_ID_DESC"] ?? '').toString();
+        m.schoolIdDesc?.oldValue = (row["SCHOOL_ID_DESC"] ?? '').toString();
+        m.classIdDesc?.newValue = (row["CLASS_ID_DESC"] ?? '').toString();
+        m.classIdDesc?.oldValue = (row["CLASS_ID_DESC"] ?? '').toString();
+        m.branchIdDesc?.newValue = (row["BRANCH_ID_DESC"] ?? '').toString();
+        m.branchIdDesc?.oldValue = (row["BRANCH_ID_DESC"] ?? '').toString();
+        m.sectionIdDesc?.newValue = (row["SECTION_ID_DESC"] ?? '').toString();
+        m.sectionIdDesc?.oldValue = (row["SECTION_ID_DESC"] ?? '').toString();
+        m.canBeUpdated = (row["CAN_BE_UPDATED"] ?? '1').toString();
+        m.operationType = 'query';
+        _hmwHomeWorkMas.add(m);
+      }
+
+      // Process PlnWeeklyPlan data
+      for (final row in weeklyPlanList) {
+        final p = PlnWeeklyPlan();
+        p.weeklyPlanSeq?.newValue = (row["WEEKLY_PLAN_SEQ"] ?? '').toString();
+        p.weeklyPlanSeq?.oldValue = (row["WEEKLY_PLAN_SEQ"] ?? '').toString();
+        p.whichDay?.newValue = (row["WHICH_DAY"] ?? '').toString();
+        p.whichDay?.oldValue = (row["WHICH_DAY"] ?? '').toString();
+        p.dayDate?.newValue = (row["DAY_DATE"] ?? '').toString();
+        p.dayDate?.oldValue = (row["DAY_DATE"] ?? '').toString();
+        p.studyYear?.newValue = (row["STUDY_YEAR"] ?? '').toString();
+        p.studyYear?.oldValue = (row["STUDY_YEAR"] ?? '').toString();
+        p.schoolId?.newValue = (row["SCHOOL_ID"] ?? '').toString();
+        p.schoolId?.oldValue = (row["SCHOOL_ID"] ?? '').toString();
+        p.classId?.newValue = (row["CLASS_ID"] ?? '').toString();
+        p.classId?.oldValue = (row["CLASS_ID"] ?? '').toString();
+        p.branchId?.newValue = (row["BRANCH_ID"] ?? '').toString();
+        p.branchId?.oldValue = (row["BRANCH_ID"] ?? '').toString();
+        p.sectionId?.newValue = (row["SECTION_ID"] ?? '').toString();
+        p.sectionId?.oldValue = (row["SECTION_ID"] ?? '').toString();
+        p.companyId?.newValue = (row["COMPANY_ID"] ?? '').toString();
+        p.companyId?.oldValue = (row["COMPANY_ID"] ?? '').toString();
+        p.sessionId?.newValue = (row["SESSION_ID"] ?? '').toString();
+        p.sessionId?.oldValue = (row["SESSION_ID"] ?? '').toString();
+        p.mrkLawId?.newValue = (row["MRK_LAW_ID"] ?? '').toString();
+        p.mrkLawId?.oldValue = (row["MRK_LAW_ID"] ?? '').toString();
+        p.subjectId?.newValue = (row["SUBJECT_ID"] ?? '').toString();
+        p.subjectId?.oldValue = (row["SUBJECT_ID"] ?? '').toString();
+        p.teacherId?.newValue = (row["TEACHER_ID"] ?? '').toString();
+        p.teacherId?.oldValue = (row["TEACHER_ID"] ?? '').toString();
+        p.taskDetails?.newValue = (row["TASK_DETAILS"] ?? '').toString();
+        p.taskDetails?.oldValue = (row["TASK_DETAILS"] ?? '').toString();
+        p.attachedLinks?.newValue = (row["ATTACHED_LINKS"] ?? '').toString();
+        p.attachedLinks?.oldValue = (row["ATTACHED_LINKS"] ?? '').toString();
+        p.isApproved?.newValue = (row["IS_APPROVED"] ?? '').toString();
+        p.isApproved?.oldValue = (row["IS_APPROVED"] ?? '').toString();
+        p.approvedBy?.newValue = (row["APPROVED_BY"] ?? '').toString();
+        p.approvedBy?.oldValue = (row["APPROVED_BY"] ?? '').toString();
+        p.semesterId?.newValue = (row["SEMESTER_ID"] ?? '').toString();
+        p.semesterId?.oldValue = (row["SEMESTER_ID"] ?? '').toString();
+        p.weekId?.newValue = (row["WEEK_ID"] ?? '').toString();
+        p.weekId?.oldValue = (row["WEEK_ID"] ?? '').toString();
+        p.unitId?.newValue = (row["UNIT_ID"] ?? '').toString();
+        p.unitId?.oldValue = (row["UNIT_ID"] ?? '').toString();
+        p.unitIdDesc?.newValue = (row["UNIT_ID_DESC"] ?? '').toString();
+        p.unitIdDesc?.oldValue = (row["UNIT_ID_DESC"] ?? '').toString();
+        p.lessonId?.newValue = (row["LESSON_ID"] ?? '').toString();
+        p.lessonId?.oldValue = (row["LESSON_ID"] ?? '').toString();
+        p.lessonIdDesc?.newValue = (row["LESSON_ID_DESC"] ?? '').toString();
+        p.lessonIdDesc?.oldValue = (row["LESSON_ID_DESC"] ?? '').toString();
+        p.lessonContent?.newValue = (row["LESSON_CONTENT"] ?? '').toString();
+        p.lessonContent?.oldValue = (row["LESSON_CONTENT"] ?? '').toString();
+        p.teacherNotes?.newValue = (row["TEACHER_NOTES"] ?? '').toString();
+        p.teacherNotes?.oldValue = (row["TEACHER_NOTES"] ?? '').toString();
+        p.taskBeforeDate?.newValue = (row["TASK_BEFORE_DATE"] ?? '').toString();
+        p.taskBeforeDate?.oldValue = (row["TASK_BEFORE_DATE"] ?? '').toString();
+        p.operationType = 'query';
+        _plnWeeklyPlanList.add(p);
+      }
+
+      if (clearResults) {
+        setState(() {
+          _hmwHomeWorkMasFiltered = [];
+          _hmwHomeWorkDtlFiltered = [];
+          _selectedMas = null;
+          _selectedDtl = null;
+        });
+      }
+
+      initDone = true;
+      initLoading = false;
+    }).catchError((e) {
+      if (showLoading) {
+        Navigator.pop(context);
+      }
+      initLoading = false;
+      GenUtils.showAlertDialog(
+          message: 'Error: $e',
+          title: genErrorTitle,
+          popAfter: '0',
+          context: context);
+      return;
+    });
+  }
+
+  Future<void> searchData() async {
+    initDone = false;
+    initLoading = false;
+    BuildContext? loadingCtx;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        loadingCtx = ctx;
+        return AlertDialog(
+          content: Row(
+            children: [
+              const CircularProgressIndicator(),
+              Container(
+                margin: const EdgeInsets.only(left: 5),
+                child: const Text('Loading'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+
+    // If no dates are selected, use the semester date range to retrieve all homeworks in the semester
+    final userSelectedFromDate = _fromShouldDateCtrl.text.trim();
+    final userSelectedToDate = _toShouldDateCtrl.text.trim();
+    final useSemesterDates =
+        userSelectedFromDate.isEmpty && userSelectedToDate.isEmpty;
+
+    if (useSemesterDates &&
+        _semesterFromDate.isNotEmpty &&
+        _semesterToDate.isNotEmpty) {
+      _fromShouldDateCtrl.text = _semesterFromDate;
+      _toShouldDateCtrl.text = _semesterToDate;
+    }
+
+    await getHmwHomeWorkMas(
+        showLoading: false, clearResults: false, showAlerts: false);
+    await getHmwHomeWorkDtl(cacheOnly: true, showLoading: false);
+    await getStudentNamesLike();
+    if (loadingCtx != null) {
+      Navigator.of(loadingCtx!).pop();
+    }
+
+    final sem = _semesterIdController.text.trim();
+    final cls = _classIdController.text.trim();
+    final br = _branchIdController.text.trim();
+    final sbj = _subjectIdController.text.trim();
+    final from = _fromShouldDateCtrl.text.trim();
+    final to = _toShouldDateCtrl.text.trim();
+
+    final clsNorm = (() {
+      final t = cls.trim();
+      if (t.isEmpty) return '';
+      final n = int.tryParse(t);
+      return n?.toString() ?? t;
+    })();
+    final brNorm = (() {
+      final t = br.trim();
+      if (t.isEmpty) return '';
+      final n = int.tryParse(t);
+      return n?.toString() ?? t;
+    })();
+    final sbjNorm = (() {
+      final t = sbj.trim();
+      if (t.isEmpty) return '';
+      final n = int.tryParse(t);
+      return n?.toString() ?? t;
+    })();
+
+    setState(() {
+      _hmwHomeWorkMasFiltered = _hmwHomeWorkMas.where((m) {
+        final mCls = (() {
+          final t = (m.classId?.newValue ?? '').toString().trim();
+          if (t.isEmpty) return '';
+          final n = int.tryParse(t);
+          return n?.toString() ?? t;
+        })();
+        final mBr = (() {
+          final t = (m.branchId?.newValue ?? '').toString().trim();
+          if (t.isEmpty) return '';
+          final n = int.tryParse(t);
+          return n?.toString() ?? t;
+        })();
+        final mSbj = (() {
+          final t = (m.subjectId?.newValue ?? '').toString().trim();
+          if (t.isEmpty) return '';
+          final n = int.tryParse(t);
+          return n?.toString() ?? t;
+        })();
+        if (mCls != clsNorm || mBr != brNorm || mSbj != sbjNorm) return false;
+
+        final sd = (m.shouldDate?.newValue ?? '').toString().trim();
+        if (from.isNotEmpty && sd.isNotEmpty && sd.compareTo(from) < 0)
+          return false;
+        if (to.isNotEmpty && sd.isNotEmpty && sd.compareTo(to) > 0)
+          return false;
+
+        return true;
+      }).toList();
+
+      _hmwHomeWorkDtlFiltered = [];
+      _selectedMas = null;
+      _selectedDtl = null;
+    });
+
+    if (_hmwHomeWorkMasFiltered.isEmpty) {
+      GenUtils.showAlertDialog(
+        message: alertNoDataToView,
+        title: genAlertTitle,
+        popAfter: '0',
+        context: context,
+      );
+    }
+  }
+
+  Future<void> getHmwHomeWorkDtl({
+    HmwHomeWorkMas? masItem,
+    bool cacheOnly = false,
+    bool showLoading = true,
+  }) async {
+    if (!cacheOnly && masItem == null) {
+      return;
+    }
+    final classId = cacheOnly
+        ? (_classIdController.text.isEmpty ? '0' : _classIdController.text)
+        : (masItem?.classId?.newValue ?? '0').toString();
+    final branchId = cacheOnly
+        ? (_branchIdController.text.isEmpty ? '0' : _branchIdController.text)
+        : (masItem?.branchId?.newValue ?? '0').toString();
+    final subjectId = cacheOnly
+        ? (_subjectIdController.text.isEmpty ? '0' : _subjectIdController.text)
+        : (masItem?.subjectId?.newValue ?? '0').toString();
+    final studyYear = cacheOnly
+        ? SecUserFileStatic.webCurrentYear
+        : (masItem?.studyYear?.newValue ?? SecUserFileStatic.webCurrentYear)
+            .toString();
+    if (showLoading) {
+      showAlertDialog(context);
+    }
+    await APICalls.postAPI(
+      methodName: 'HmwService.asmx/GetHmwHomeWorkDtl',
+      postBody: {
+        'pUserSeq': '${SecUserFileStatic.userSeq}',
+        'pHashedColumn': '${SecUserFileStatic.hashedColumn}',
+        'pPathName': 'HmwHomeWorkMasPage',
+        'pHomeWorkSeq': cacheOnly
+            ? '0'
+            : (masItem?.homeWorkSeq?.newValue ?? '0').toString(),
+        'pWeeklyPlanSeq': '0',
+        'pStudyYear': studyYear,
+        'pSchoolId':
+            cacheOnly ? '0' : (masItem?.schoolId?.newValue ?? '0').toString(),
+        'pClassId': classId,
+        'pBranchId': branchId,
+        'pSectionId':
+            cacheOnly ? '0' : (masItem?.sectionId?.newValue ?? '0').toString(),
+        'pFromShouldDate': cacheOnly ? _fromShouldDateCtrl.text.trim() : '',
+        'pToShouldDate': cacheOnly ? _toShouldDateCtrl.text.trim() : '',
+        'pFamilyId': '0',
+        'pStudentId': '0',
+        'pUnitID':
+            cacheOnly ? '0' : (masItem?.unitId?.newValue ?? '0').toString(),
+        'pLessonId':
+            cacheOnly ? '0' : (masItem?.lessonId?.newValue ?? '0').toString(),
+        'pSubjectId': subjectId,
+        'pTeacherId': '${SecUserFileStatic.empId}',
+      },
+    ).then((value) {
+      if (showLoading) {
+        Navigator.pop(context);
+      }
+
+      if (value['ReturnValuesList'][0]["VALUE1"].toString() != '0') {
+        String errorText = value['ReturnValuesList'][0]["VALUE1"].toString();
+        GenUtils.showAlertDialog(
+            message: errorText,
+            title: genErrorTitle,
+            popAfter: '0',
+            context: context);
+        return;
+      }
+
+      final List<HmwHomeWorkDtl> all = [];
+      if (value['HmwHomeWorkDtlList'] != null) {
+        for (final row in value['HmwHomeWorkDtlList']) {
+          final d = HmwHomeWorkDtl();
+          d.homeWorkSeq?.newValue = (row["HOME_WORK_SEQ"] ?? '').toString();
+          d.homeWorkSeq?.oldValue = (row["HOME_WORK_SEQ"] ?? '').toString();
+          d.weeklyPlanSeq?.newValue = (row["WEEKLY_PLAN_SEQ"] ?? '').toString();
+          d.weeklyPlanSeq?.oldValue = (row["WEEKLY_PLAN_SEQ"] ?? '').toString();
+          d.studyYear?.newValue = (row["STUDY_YEAR"] ?? '').toString();
+          d.studyYear?.oldValue = (row["STUDY_YEAR"] ?? '').toString();
+          d.semesterId?.newValue = (row["SEMESTER_ID"] ?? '').toString();
+          d.semesterId?.oldValue = (row["SEMESTER_ID"] ?? '').toString();
+          d.schoolId?.newValue = (row["SCHOOL_ID"] ?? '').toString();
+          d.schoolId?.oldValue = (row["SCHOOL_ID"] ?? '').toString();
+          d.classId?.newValue = (row["CLASS_ID"] ?? '').toString();
+          d.classId?.oldValue = (row["CLASS_ID"] ?? '').toString();
+          d.branchId?.newValue = (row["BRANCH_ID"] ?? '').toString();
+          d.branchId?.oldValue = (row["BRANCH_ID"] ?? '').toString();
+          d.sectionId?.newValue = (row["SECTION_ID"] ?? '').toString();
+          d.sectionId?.oldValue = (row["SECTION_ID"] ?? '').toString();
+          d.companyId?.newValue = (row["COMPANY_ID"] ?? '').toString();
+          d.companyId?.oldValue = (row["COMPANY_ID"] ?? '').toString();
+          d.teacherId?.newValue = (row["TEACHER_ID"] ?? '').toString();
+          d.teacherId?.oldValue = (row["TEACHER_ID"] ?? '').toString();
+          d.subjectId?.newValue = (row["SUBJECT_ID"] ?? '').toString();
+          d.subjectId?.oldValue = (row["SUBJECT_ID"] ?? '').toString();
+          d.initDate?.newValue = (row["INIT_DATE"] ?? '').toString();
+          d.initDate?.oldValue = (row["INIT_DATE"] ?? '').toString();
+          d.shouldDate?.newValue = (row["SHOULD_DATE"] ?? '').toString();
+          d.shouldDate?.oldValue = (row["SHOULD_DATE"] ?? '').toString();
+          d.unitId?.newValue = (row["UNIT_ID"] ?? '').toString();
+          d.unitId?.oldValue = (row["UNIT_ID"] ?? '').toString();
+          d.lessonId?.newValue = (row["LESSON_ID"] ?? '').toString();
+          d.lessonId?.oldValue = (row["LESSON_ID"] ?? '').toString();
+          d.taskDetail?.newValue = (row["TASK_DETAIL"] ?? '').toString();
+          d.taskDetail?.oldValue = (row["TASK_DETAIL"] ?? '').toString();
+          d.familyId?.newValue = (row["FAMILY_ID"] ?? '').toString();
+          d.familyId?.oldValue = (row["FAMILY_ID"] ?? '').toString();
+          d.studentId?.newValue = (row["STUDENT_ID"] ?? '').toString();
+          d.studentId?.oldValue = (row["STUDENT_ID"] ?? '').toString();
+          d.transStatus?.newValue = (row["TRANS_STATUS"] ?? '').toString();
+          d.transStatus?.oldValue = (row["TRANS_STATUS"] ?? '').toString();
+          d.notes?.newValue = (row["NOTES"] ?? '').toString();
+          d.notes?.oldValue = (row["NOTES"] ?? '').toString();
+          d.userCreate?.newValue = (row["USER_CREATE"] ?? '').toString();
+          d.userCreate?.oldValue = (row["USER_CREATE"] ?? '').toString();
+          d.pcNameCreate?.newValue = (row["PC_NAME_CREATE"] ?? '').toString();
+          d.pcNameCreate?.oldValue = (row["PC_NAME_CREATE"] ?? '').toString();
+          d.ipCreate?.newValue = (row["IP_CREATE"] ?? '').toString();
+          d.ipCreate?.oldValue = (row["IP_CREATE"] ?? '').toString();
+          d.dateCreated?.newValue = (row["DATE_CREATED"] ?? '').toString();
+          d.dateCreated?.oldValue = (row["DATE_CREATED"] ?? '').toString();
+          d.userModify?.newValue = (row["USER_MODIFY"] ?? '').toString();
+          d.userModify?.oldValue = (row["USER_MODIFY"] ?? '').toString();
+          d.pcNameModify?.newValue = (row["PC_NAME_MODIFY"] ?? '').toString();
+          d.pcNameModify?.oldValue = (row["PC_NAME_MODIFY"] ?? '').toString();
+          d.ipModify?.newValue = (row["IP_MODIFY"] ?? '').toString();
+          d.ipModify?.oldValue = (row["IP_MODIFY"] ?? '').toString();
+          d.dateModified?.newValue = (row["DATE_MODIFIED"] ?? '').toString();
+          d.dateModified?.oldValue = (row["DATE_MODIFIED"] ?? '').toString();
+          d.unitIdDesc?.newValue = (row["UNIT_ID_DESC"] ?? '').toString();
+          d.unitIdDesc?.oldValue = (row["UNIT_ID_DESC"] ?? '').toString();
+          d.lessonIdDesc?.newValue = (row["LESSON_ID_DESC"] ?? '').toString();
+          d.lessonIdDesc?.oldValue = (row["LESSON_ID_DESC"] ?? '').toString();
+          d.studentIdDesc?.newValue = (row["STUDENT_ID_DESC"] ?? '').toString();
+          d.studentIdDesc?.oldValue = (row["STUDENT_ID_DESC"] ?? '').toString();
+          d.familyIdDesc?.newValue = (row["FAMILY_ID_DESC"] ?? '').toString();
+          d.familyIdDesc?.oldValue = (row["FAMILY_ID_DESC"] ?? '').toString();
+          d.operationType = 'query';
+          all.add(d);
+        }
+      }
+
+      setState(() {
+        if (cacheOnly) {
+          _hmwHomeWorkDtl = all;
+        } else {
+          _hmwHomeWorkDtlFiltered = all;
+        }
+      });
+    }).catchError((e) {
+      if (showLoading) {
+        Navigator.pop(context);
+      }
+      GenUtils.showAlertDialog(
+          message: 'Error: $e, \nCall The Company',
+          title: genErrorTitle,
+          popAfter: '0',
+          context: context);
+      return;
+    });
+  }
+
+  Future<String> updHmwHomeWorkMas({bool showEmptyAlert = true}) async {
+    List<Map<String, dynamic>> hmwHomeWorkMasUDT = [];
+    Map<String, dynamic> record;
+
+    for (int i = 0; i < _hmwHomeWorkMasFiltered.length; i++) {
+      if (_hmwHomeWorkMasFiltered[i].operationType != 'query') {
+        record = {
+          "HOME_WORK_SEQ": _hmwHomeWorkMasFiltered[i].homeWorkSeq?.newValue,
+          "WEEKLY_PLAN_SEQ": _hmwHomeWorkMasFiltered[i].weeklyPlanSeq?.newValue,
+          "STUDY_YEAR": _hmwHomeWorkMasFiltered[i].studyYear?.newValue,
+          "SEMESTER_ID": _hmwHomeWorkMasFiltered[i].semesterId?.newValue,
+          "SCHOOL_ID": _hmwHomeWorkMasFiltered[i].schoolId?.newValue,
+          "CLASS_ID": _hmwHomeWorkMasFiltered[i].classId?.newValue,
+          "BRANCH_ID": _hmwHomeWorkMasFiltered[i].branchId?.newValue,
+          "SECTION_ID": _hmwHomeWorkMasFiltered[i].sectionId?.newValue,
+          "COMPANY_ID": _hmwHomeWorkMasFiltered[i].companyId?.newValue ?? '1',
+          "TEACHER_ID": _hmwHomeWorkMasFiltered[i].teacherId?.newValue,
+          "SUBJECT_ID": _hmwHomeWorkMasFiltered[i].subjectId?.newValue,
+          "INIT_DATE": _hmwHomeWorkMasFiltered[i].initDate?.newValue,
+          "SHOULD_DATE": _hmwHomeWorkMasFiltered[i].shouldDate?.newValue,
+          "UNIT_ID": _hmwHomeWorkMasFiltered[i].unitId?.newValue,
+          "UNIT_DESC": _hmwHomeWorkMasFiltered[i].unitDesc?.newValue,
+          "LESSON_ID": _hmwHomeWorkMasFiltered[i].lessonId?.newValue,
+          "LESSON_DESC": _hmwHomeWorkMasFiltered[i].lessonDesc?.newValue,
+          "TASK_DETAIL": _hmwHomeWorkMasFiltered[i].taskDetail?.newValue,
+          "USER_CREATE": _hmwHomeWorkMasFiltered[i].userCreate?.newValue ??
+              SecUserFileStatic.userSeq,
+          "PC_NAME_CREATE": _hmwHomeWorkMasFiltered[i].pcNameCreate?.newValue ??
+              ((HardwareUtils.deviceMAC)?.substring(0, 19) ?? '1'),
+          "IP_CREATE": '127.0.0.1',
+          "DATE_CREATED":
+              _hmwHomeWorkMasFiltered[i].dateCreated?.newValue ?? '',
+          "USER_MODIFY": _hmwHomeWorkMasFiltered[i].userModify?.newValue ??
+              SecUserFileStatic.userSeq,
+          "PC_NAME_MODIFY": _hmwHomeWorkMasFiltered[i].pcNameModify?.newValue ??
+              ((HardwareUtils.deviceMAC)?.substring(0, 19) ?? '1'),
+          "IP_MODIFY": _hmwHomeWorkMasFiltered[i].ipModify?.newValue ??
+              (SecUserFileStatic.ipModify ?? '1'),
+          "DATE_MODIFIED":
+              _hmwHomeWorkMasFiltered[i].dateModified?.newValue ?? '',
+          "SUBJECT_ID_DESC": _hmwHomeWorkMasFiltered[i].subjectIdDesc?.newValue,
+          "UNIT_ID_DESC": _hmwHomeWorkMasFiltered[i].unitIdDesc?.newValue,
+          "LESSON_ID_DESC": _hmwHomeWorkMasFiltered[i].lessonIdDesc?.newValue,
+          "TEACHER_ID_DESC": _hmwHomeWorkMasFiltered[i].teacherIdDesc?.newValue,
+          "SCHOOL_ID_DESC": _hmwHomeWorkMasFiltered[i].schoolIdDesc?.newValue,
+          "CLASS_ID_DESC": _hmwHomeWorkMasFiltered[i].classIdDesc?.newValue,
+          "BRANCH_ID_DESC": _hmwHomeWorkMasFiltered[i].branchIdDesc?.newValue,
+          "SECTION_ID_DESC": _hmwHomeWorkMasFiltered[i].sectionIdDesc?.newValue,
+          "CAN_BE_UPDATED": _hmwHomeWorkMasFiltered[i].canBeUpdated,
+          "USER_SEQ": SecUserFileStatic.userSeq,
+          "OPERATION_TYPE": _hmwHomeWorkMasFiltered[i].operationType,
+        };
+        hmwHomeWorkMasUDT.add(record);
+      }
+    }
+
+    if (hmwHomeWorkMasUDT.isEmpty) {
+      if (showEmptyAlert) {
+        GenUtils.showAlertDialog(
+            context: context,
+            title: genAlertTitle,
+            message: alertNoTransactionsToSave,
+            popAfter: '0');
+      }
+      return '';
+    }
+
+    BuildContext? loadingCtx;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        loadingCtx = ctx;
+        return AlertDialog(
+          content: Row(
+            children: [
+              const CircularProgressIndicator(),
+              Container(
+                margin: const EdgeInsets.only(left: 5),
+                child: const Text('Loading'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    APICalls.postAPI(
+      methodName: 'HmwService.asmx/UpdHmwHomeWorkMas',
+      postBody: {
+        'pUserSeq': '${SecUserFileStatic.userSeq}',
+        'pHashedColumn': '${SecUserFileStatic.hashedColumn}',
+        'pPathName': 'HmwHomeWorkMasPage',
+        'pPcName': (HardwareUtils.deviceMAC)?.substring(0, 19) ?? '1',
+        'listHmwHomeWorkMasUDT': hmwHomeWorkMasUDT,
+      },
+    ).then((value) async {
+      if (!mounted) return;
+      if (loadingCtx != null) {
+        Navigator.of(loadingCtx!).pop();
+        loadingCtx = null;
+      }
+
+      if (value['ReturnValuesList'][0]["VALUE1"].toString() != '0') {
+        String errorText = value['ReturnValuesList'][0]["VALUE1"].toString();
+        GenUtils.showAlertDialog(
+            message: errorText,
+            title: genErrorTitle,
+            popAfter: '0',
+            context: context);
+        return;
+      }
+
+      // Get the newly generated HOME_WORK_SEQ from VALUE2
+      final newHomeWorkSeq =
+          value['ReturnValuesList'][0]["VALUE2"].toString().trim();
+
+      // Update any newly inserted homeworks with the generated sequence number
+      if (newHomeWorkSeq.isNotEmpty) {
+        setState(() {
+          for (final m in _hmwHomeWorkMasFiltered) {
+            if (m.operationType == 'insert') {
+              m.homeWorkSeq?.newValue = newHomeWorkSeq;
+              m.homeWorkSeq?.oldValue = newHomeWorkSeq;
+              m.operationType = 'query';
+            } else if (m.operationType != 'query') {
+              m.operationType = 'query';
+            }
+          }
+          for (final m in _hmwHomeWorkMas) {
+            if (m.operationType == 'insert') {
+              m.homeWorkSeq?.newValue = newHomeWorkSeq;
+              m.homeWorkSeq?.oldValue = newHomeWorkSeq;
+              m.operationType = 'query';
+            } else if (m.operationType != 'query') {
+              m.operationType = 'query';
+            }
+          }
+        });
+      } else {
+        setState(() {
+          for (final m in _hmwHomeWorkMasFiltered) {
+            if (m.operationType != 'query') {
+              m.operationType = 'query';
+            }
+          }
+          for (final m in _hmwHomeWorkMas) {
+            if (m.operationType != 'query') {
+              m.operationType = 'query';
+            }
+          }
+        });
+      }
+
+      GenUtils.showAlertDialog(
+          message: successfullySaved,
+          title: genOKTitle,
+          popAfter: '0',
+          context: context);
+    }).catchError((e) {
+      if (!mounted) return;
+      if (loadingCtx != null) {
+        Navigator.of(loadingCtx!).pop();
+        loadingCtx = null;
+      }
+      GenUtils.showAlertDialog(
+          message: 'Error: $e, \nCall The Company',
+          title: genErrorTitle,
+          popAfter: '0',
+          context: context);
+      return;
+    });
+
+    return Future.delayed(const Duration(milliseconds: 500), () {
+      return "OK";
+    });
+  }
+
+  Future<String> updHmwHomeWorkDtl({bool showEmptyAlert = true}) async {
+    // First, check if there are any unsaved homeworks with pending student additions
+    final unsavedHomeworkIds = <String>{};
+    for (final dtl in _hmwHomeWorkDtlFiltered) {
+      if (dtl.operationType != 'query') {
+        final hwSeq = (dtl.homeWorkSeq?.newValue ?? '').toString().trim();
+        if (hwSeq.isEmpty) {
+          // Student is being added to an unsaved homework
+          unsavedHomeworkIds
+              .add((dtl.homeWorkSeq?.oldValue ?? '').toString().trim());
+        }
+      }
+    }
+
+    // If there are unsaved homeworks, save them first
+    if (unsavedHomeworkIds.isNotEmpty ||
+        _hmwHomeWorkMasFiltered.any((m) => m.operationType == 'insert')) {
+      await updHmwHomeWorkMas(showEmptyAlert: false);
+
+      // Refetch to get homeWorkSeq values
+      await getHmwHomeWorkMas(
+          showLoading: false, clearResults: false, showAlerts: false);
+
+      // Update _hmwHomeWorkDtlFiltered with the homeWorkSeq from refetched data
+      for (final dtl in _hmwHomeWorkDtlFiltered) {
+        if (dtl.operationType == 'insert') {
+          for (final refreshed in _hmwHomeWorkMas) {
+            if ((refreshed.initDate?.newValue ?? '') ==
+                    (dtl.initDate?.newValue ?? '') &&
+                (refreshed.shouldDate?.newValue ?? '') ==
+                    (dtl.shouldDate?.newValue ?? '') &&
+                (refreshed.classId?.newValue ?? '') ==
+                    (dtl.classId?.newValue ?? '')) {
+              dtl.homeWorkSeq?.newValue = refreshed.homeWorkSeq?.newValue;
+              dtl.homeWorkSeq?.oldValue = refreshed.homeWorkSeq?.oldValue;
+              break;
+            }
+          }
+        }
+      }
+    }
+
+    List<Map<String, dynamic>> hmwHomeWorkDtlUDT = [];
+    Map<String, dynamic> record;
+
+    for (int i = 0; i < _hmwHomeWorkDtlFiltered.length; i++) {
+      if (_hmwHomeWorkDtlFiltered[i].operationType != 'query') {
+        record = {
+          "HOME_WORK_SEQ": _hmwHomeWorkDtlFiltered[i].homeWorkSeq?.newValue,
+          "WEEKLY_PLAN_SEQ": _hmwHomeWorkDtlFiltered[i].weeklyPlanSeq?.newValue,
+          "STUDY_YEAR": _hmwHomeWorkDtlFiltered[i].studyYear?.newValue,
+          "SEMESTER_ID": _hmwHomeWorkDtlFiltered[i].semesterId?.newValue,
+          "SCHOOL_ID": _hmwHomeWorkDtlFiltered[i].schoolId?.newValue,
+          "CLASS_ID": _hmwHomeWorkDtlFiltered[i].classId?.newValue,
+          "BRANCH_ID": _hmwHomeWorkDtlFiltered[i].branchId?.newValue,
+          "SECTION_ID": _hmwHomeWorkDtlFiltered[i].sectionId?.newValue,
+          "COMPANY_ID": _hmwHomeWorkDtlFiltered[i].companyId?.newValue ?? '1',
+          "TEACHER_ID": _hmwHomeWorkDtlFiltered[i].teacherId?.newValue,
+          "SUBJECT_ID": _hmwHomeWorkDtlFiltered[i].subjectId?.newValue,
+          "INIT_DATE": _hmwHomeWorkDtlFiltered[i].initDate?.newValue,
+          "SHOULD_DATE": _hmwHomeWorkDtlFiltered[i].shouldDate?.newValue,
+          "UNIT_ID": _hmwHomeWorkDtlFiltered[i].unitId?.newValue,
+          "LESSON_ID": _hmwHomeWorkDtlFiltered[i].lessonId?.newValue,
+          "TASK_DETAIL": _hmwHomeWorkDtlFiltered[i].taskDetail?.newValue,
+          "FAMILY_ID": _hmwHomeWorkDtlFiltered[i].familyId?.newValue,
+          "STUDENT_ID": _hmwHomeWorkDtlFiltered[i].studentId?.newValue,
+          "TRANS_STATUS": _hmwHomeWorkDtlFiltered[i].transStatus?.newValue,
+          "NOTES": _hmwHomeWorkDtlFiltered[i].notes?.newValue,
+          "USER_CREATE": _hmwHomeWorkDtlFiltered[i].userCreate?.newValue ??
+              SecUserFileStatic.userSeq,
+          "PC_NAME_CREATE": _hmwHomeWorkDtlFiltered[i].pcNameCreate?.newValue ??
+              ((HardwareUtils.deviceMAC)?.substring(0, 19) ?? '1'),
+          "IP_CREATE":
+              _hmwHomeWorkDtlFiltered[i].ipCreate?.newValue ?? '127.0.0.1',
+          "DATE_CREATED":
+              _hmwHomeWorkDtlFiltered[i].dateCreated?.newValue ?? '',
+          "USER_MODIFY": _hmwHomeWorkDtlFiltered[i].userModify?.newValue ??
+              SecUserFileStatic.userSeq,
+          "PC_NAME_MODIFY": _hmwHomeWorkDtlFiltered[i].pcNameModify?.newValue ??
+              ((HardwareUtils.deviceMAC)?.substring(0, 19) ?? '1'),
+          "IP_MODIFY": _hmwHomeWorkDtlFiltered[i].ipModify?.newValue ??
+              (SecUserFileStatic.ipModify ?? '1'),
+          "DATE_MODIFIED":
+              _hmwHomeWorkDtlFiltered[i].dateModified?.newValue ?? '',
+          "UNIT_ID_DESC": _hmwHomeWorkDtlFiltered[i].unitIdDesc?.newValue,
+          "LESSON_ID_DESC": _hmwHomeWorkDtlFiltered[i].lessonIdDesc?.newValue,
+          "STUDENT_ID_DESC": _hmwHomeWorkDtlFiltered[i].studentIdDesc?.newValue,
+          "FAMILY_ID_DESC": _hmwHomeWorkDtlFiltered[i].familyIdDesc?.newValue,
+          "CAN_BE_UPDATED": _hmwHomeWorkDtlFiltered[i].canBeUpdated,
+          "USER_SEQ": SecUserFileStatic.userSeq,
+          "OPERATION_TYPE": _hmwHomeWorkDtlFiltered[i].operationType,
+        };
+        hmwHomeWorkDtlUDT.add(record);
+      }
+    }
+
+    if (hmwHomeWorkDtlUDT.isEmpty) {
+      if (showEmptyAlert) {
+        GenUtils.showAlertDialog(
+            context: context,
+            title: genAlertTitle,
+            message: alertNoTransactionsToSave,
+            popAfter: '0');
+      }
+      return '';
+    }
+
+    BuildContext? loadingCtx;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) {
+        loadingCtx = ctx;
+        return AlertDialog(
+          content: Row(
+            children: [
+              const CircularProgressIndicator(),
+              Container(
+                margin: const EdgeInsets.only(left: 5),
+                child: const Text('Loading'),
+              ),
+            ],
+          ),
+        );
+      },
+    );
+    APICalls.postAPI(
+      methodName: 'HmwService.asmx/UpdHmwHomeWorkDtl',
+      postBody: {
+        'pUserSeq': '${SecUserFileStatic.userSeq}',
+        'pHashedColumn': '${SecUserFileStatic.hashedColumn}',
+        'pPathName': 'HmwHomeWorkMasPage',
+        'pPcName': (HardwareUtils.deviceMAC)?.substring(0, 19) ?? '1',
+        'listHmwHomeWorkDtlUDT': hmwHomeWorkDtlUDT,
+      },
+    ).then((value) async {
+      if (!mounted) return;
+      if (loadingCtx != null) {
+        Navigator.of(loadingCtx!).pop();
+        loadingCtx = null;
+      }
+
+      if (value['ReturnValuesList'][0]["VALUE1"].toString() != '0') {
+        String errorText = value['ReturnValuesList'][0]["VALUE1"].toString();
+
+        // Check if it's a duplicate key constraint violation
+        final duplicatePattern = RegExp(r'\bORA-00001\b');
+        if (duplicatePattern.hasMatch(errorText)) {
+          errorText = 'هذا الطالب مضاف مسبقا';
+
+          // Remove newly added items (duplicates) from local lists
+          setState(() {
+            // Find all items with 'insert' operation type and remove them
+            final itemsToRemove = _hmwHomeWorkDtlFiltered
+                .where((item) => item.operationType == 'insert')
+                .toList();
+
+            for (final item in itemsToRemove) {
+              final familyId =
+                  (item.familyId?.newValue ?? '').toString().padLeft(3,'0');
+              final studentId =
+                  (item.studentId?.newValue ?? '').toString().padLeft(2,'0');
+              final ats = '$familyId$studentId';
+              final studentLabel =
+                  (item.studentIdDesc?.newValue ?? '').toString();
+
+              // Remove from filtered and full lists
+              _hmwHomeWorkDtlFiltered.removeWhere((d) => d == item);
+              _hmwHomeWorkDtl.removeWhere((d) => d == item);
+
+              // Add back to student options
+              if (ats.isNotEmpty &&
+                  !_studentOptions.any((o) => o.hiddenKey.toString() == ats)) {
+                _studentOptions.add(Option(
+                  hiddenKey: ats,
+                  lovId: ats,
+                  lovLabel: studentLabel,
+                ));
+              }
+            }
+          });
+        }
+
+        GenUtils.showAlertDialog(
+            message: errorText,
+            title: genErrorTitle,
+            popAfter: '0',
+            context: context);
+        return;
+      }
+
+      // Mark saved items as 'query' to prevent re-saving
+      for (var item in _hmwHomeWorkDtlFiltered) {
+        if (item.operationType != 'query') {
+          item.operationType = 'query';
+        }
+      }
+
+      setState(() {});
+
+      GenUtils.showAlertDialog(
+          message: successfullySaved,
+          title: genOKTitle,
+          popAfter: '0',
+          context: context);
+    }).catchError((e) {
+      if (!mounted) return;
+      if (loadingCtx != null) {
+        Navigator.of(loadingCtx!).pop();
+        loadingCtx = null;
+      }
+
+      String errorMessage = 'Error: $e, \nCall The Company';
+      // Check if it's a duplicate key constraint violation
+      final duplicatePattern = RegExp(r'\bORA-00001\b');
+      if (duplicatePattern.hasMatch(e.toString())) {
+        errorMessage = 'هذا الطالب مضاف مسبقا';
+      }
+
+      GenUtils.showAlertDialog(
+          message: errorMessage,
+          title: genErrorTitle,
+          popAfter: '0',
+          context: context);
+      return;
+    });
+
+    return Future.delayed(const Duration(milliseconds: 500), () {
+      return "OK";
+    });
+  }
+
+  Future<void> showMasForm({
+    HmwHomeWorkMas? item,
+    required String operationType,
+    bool manualUnitLesson = false,
+  }) async {
+    final isEdit = item != null;
+
+    // Auto-detect manual mode by checking weeklyPlanSeq
+    bool isManualMode = manualUnitLesson;
+    if (isEdit && !manualUnitLesson) {
+      final weeklyPlanSeq =
+          (item?.weeklyPlanSeq?.newValue ?? '').toString().trim();
+      // If no weeklyPlanSeq, it was added manually
+      if (weeklyPlanSeq.isEmpty || weeklyPlanSeq == '0') {
+        isManualMode = true;
+      }
+    }
+
+    // Check if form has required fields populated (either from dropdown or search results)
+    if (!isEdit) {
+      final hasClassSubjectFromDropdown = _classSubject != null;
+      final hasClassSubjectFromSearch =
+          _classIdController.text.trim().isNotEmpty &&
+              _branchIdController.text.trim().isNotEmpty &&
+              _subjectIdController.text.trim().isNotEmpty;
+
+      if (!hasClassSubjectFromDropdown && !hasClassSubjectFromSearch) {
+        GenUtils.showAlertDialog(
+            message: 'يرجى اختيار الفصل والصف والفرع والمادة أولاً',
+            title: genAlertTitle,
+            popAfter: '0',
+            context: context);
+        return;
+      }
+    }
+    final formKey = GlobalKey<FormState>();
+
+    final initDateCtrl = TextEditingController(
+        text: (item?.initDate?.newValue ?? '').toString());
+    final shouldDateCtrl = TextEditingController(
+        text: (item?.shouldDate?.newValue ?? '').toString());
+    final unitIdCtrl =
+        TextEditingController(text: (item?.unitId?.newValue ?? '').toString());
+    final lessonIdCtrl = TextEditingController(
+        text: (item?.lessonId?.newValue ?? '').toString());
+
+    // For unit desc: check unitDesc first (manual), then unitIdDesc (LOV), then unitId as fallback
+    final unitDescCtrl = TextEditingController(
+        text: (item?.unitDesc?.newValue ??
+                item?.unitIdDesc?.newValue ??
+                item?.unitId?.newValue ??
+                '')
+            .toString());
+
+    // For lesson desc: check lessonDesc first (manual), then lessonIdDesc (LOV), then lessonId as fallback
+    final lessonDescCtrl = TextEditingController(
+        text: (item?.lessonDesc?.newValue ??
+                item?.lessonIdDesc?.newValue ??
+                item?.lessonId?.newValue ??
+                '')
+            .toString());
+    final taskDetailCtrl = TextEditingController(
+        text: (item?.taskDetail?.newValue ?? '').toString());
+
+    final classId = _classIdController.text.trim().isNotEmpty
+        ? _classIdController.text.trim()
+        : (item?.classId?.newValue ?? '').toString().trim();
+    final branchId = _branchIdController.text.trim().isNotEmpty
+        ? _branchIdController.text.trim()
+        : (item?.branchId?.newValue ?? '').toString().trim();
+    final subjectId = _subjectIdController.text.trim().isNotEmpty
+        ? _subjectIdController.text.trim()
+        : (item?.subjectId?.newValue ?? '').toString().trim();
+    // Always use the current semester from header or the item's semester for edit
+    final semesterId = _semesterIdController.text.trim().isNotEmpty
+        ? _semesterIdController.text.trim()
+        : (item?.semesterId?.newValue ?? '').toString().trim();
+
+    Option? selectedWeeklyPlanOption;
+    PlnWeeklyPlan? selectedWeeklyPlan;
+    final weeklyPlanOptions = <Option>[];
+
+    if (!isManualMode && !isEdit) {
+      // If weekly plans haven't been fetched yet, fetch them now
+      if (_plnWeeklyPlanList.isEmpty) {
+        showAlertDialog(context);
+
+        // Set semester dates if date fields are empty (same as searchData does)
+        final userSelectedFromDate = _fromShouldDateCtrl.text.trim();
+        final userSelectedToDate = _toShouldDateCtrl.text.trim();
+        final useSemesterDates =
+            userSelectedFromDate.isEmpty && userSelectedToDate.isEmpty;
+
+        if (useSemesterDates &&
+            _semesterFromDate.isNotEmpty &&
+            _semesterToDate.isNotEmpty) {
+          _fromShouldDateCtrl.text = _semesterFromDate;
+          _toShouldDateCtrl.text = _semesterToDate;
+        }
+
+        // Reset guard flags to allow fetching
+        initDone = false;
+        initLoading = false;
+        await getHmwHomeWorkMas(
+            showLoading: false, clearResults: false, showAlerts: false);
+        if (mounted) Navigator.pop(context);
+      }
+
+      final clsNorm = (() {
+        final t = classId.trim();
+        if (t.isEmpty) return '';
+        final n = int.tryParse(t);
+        return n?.toString() ?? t;
+      })();
+      final brNorm = (() {
+        final t = branchId.trim();
+        if (t.isEmpty) return '';
+        final n = int.tryParse(t);
+        return n?.toString() ?? t;
+      })();
+      final sbjNorm = (() {
+        final t = subjectId.trim();
+        if (t.isEmpty) return '';
+        final n = int.tryParse(t);
+        return n?.toString() ?? t;
+      })();
+      final semNorm = (() {
+        final t = semesterId.trim();
+        if (t.isEmpty) return '';
+        final n = int.tryParse(t);
+        return n?.toString() ?? t;
+      })();
+
+      for (final plan in _plnWeeklyPlanList) {
+        final planCls = (() {
+          final t = (plan.classId?.newValue ?? '').toString().trim();
+          if (t.isEmpty) return '';
+          final n = int.tryParse(t);
+          return n?.toString() ?? t;
+        })();
+        final planBr = (() {
+          final t = (plan.branchId?.newValue ?? '').toString().trim();
+          if (t.isEmpty) return '';
+          final n = int.tryParse(t);
+          return n?.toString() ?? t;
+        })();
+        final planSbj = (() {
+          final t = (plan.subjectId?.newValue ?? '').toString().trim();
+          if (t.isEmpty) return '';
+          final n = int.tryParse(t);
+          return n?.toString() ?? t;
+        })();
+        final planSem = (() {
+          final t = (plan.semesterId?.newValue ?? '').toString().trim();
+          if (t.isEmpty) return '';
+          final n = int.tryParse(t);
+          return n?.toString() ?? t;
+        })();
+        if (planCls != clsNorm || planBr != brNorm || planSbj != sbjNorm) {
+          continue;
+        }
+        if (semNorm.isNotEmpty && planSem != semNorm) {
+          continue;
+        }
+
+        final seq = (plan.weeklyPlanSeq?.newValue ?? '').toString().trim();
+        if (seq.isEmpty) continue;
+
+        final dayDate = (plan.dayDate?.newValue ?? '').toString().trim();
+        final unitId = (plan.unitId?.newValue ?? '').toString().trim();
+        final lessonId = (plan.lessonId?.newValue ?? '').toString().trim();
+        final unitIdDesc = (plan.unitIdDesc?.newValue ?? '').toString().trim();
+        final lessonIdDesc =
+            (plan.lessonIdDesc?.newValue ?? '').toString().trim();
+        final taskDetails =
+            (plan.taskDetails?.newValue ?? '').toString().trim();
+        final unitLabel = unitIdDesc.isNotEmpty ? unitIdDesc : unitId;
+        final lessonLabel = lessonIdDesc.isNotEmpty ? lessonIdDesc : lessonId;
+        final label = [dayDate, unitLabel, lessonLabel]
+            .where((v) => v.isNotEmpty)
+            .join(' | ');
+
+        weeklyPlanOptions.add(Option(
+          hiddenKey: seq,
+          lovId: dayDate,
+          lovLabel: label.isEmpty ? seq : label,
+          addedValue2: unitLabel,
+          addedValue3: lessonLabel,
+          addedValue4: taskDetails,
+        ));
+      }
+
+      weeklyPlanOptions.sort(
+        (a, b) => a.lovId.toString().compareTo(b.lovId.toString()),
+      );
+
+      // If no weekly plans found for this subject, show error and return
+      if (weeklyPlanOptions.isEmpty) {
+        GenUtils.showAlertDialog(
+          message: 'لا توجد خطة لهذه المادة في هذا الفصل',
+          title: genAlertTitle,
+          popAfter: '0',
+          context: context,
+        );
+        return;
+      }
+    }
+
+    Option? selectedUnit;
+    Option? selectedLesson;
+
+    if (!isManualMode) {
+      final lovLoaded = await getPlnSubUnitLsn(
+        classId: classId,
+        branchId: branchId,
+        subjectId: subjectId,
+        semesterId: semesterId,
+      );
+      if (!lovLoaded) return;
+
+      // For new homework using weekly plan (not edit), start with empty selections
+      if (!isEdit) {
+        selectedUnit = null;
+        selectedLesson = null;
+        unitIdCtrl.clear();
+        lessonIdCtrl.clear();
+      } else {
+        //Find unit option by key
+        for (final opt in _unitOptions) {
+          if (opt.hiddenKey == unitIdCtrl.text.trim()) {
+            selectedUnit = opt;
+            break;
+          }
+        }
+
+        //Find lesson option by key
+        for (final opt in _lessonOptions) {
+          if (opt.hiddenKey == lessonIdCtrl.text.trim()) {
+            selectedLesson = opt;
+            break;
+          }
+        }
+        if (selectedUnit == null && _unitOptions.isNotEmpty) {
+          selectedUnit = _unitOptions.first;
+          unitIdCtrl.text = selectedUnit.hiddenKey;
+        }
+        if (selectedLesson == null &&
+            selectedUnit != null &&
+            _lessonOptions.isNotEmpty) {
+          final unitLessons = _lessonOptions
+              .where((o) => o.addedValue2 == selectedUnit!.hiddenKey)
+              .toList();
+          if (unitLessons.isNotEmpty) {
+            selectedLesson = unitLessons.first;
+            lessonIdCtrl.text = selectedLesson.hiddenKey;
+          }
+        }
+      }
+    }
+
+    showDialog(
+      context: context,
+      builder: (context) => Directionality(
+          textDirection: TextDirection.rtl,
+          child: StatefulBuilder(
+            builder: (context, setLocalState) {
+            final lockWeeklyPlanFields =
+                !isManualMode && !isEdit && selectedWeeklyPlanOption == null;
+            return AlertDialog(
+                title: Text(
+                  isEdit
+                      ? 'تعديل واجب'
+                      : (isManualMode
+                          ? 'إضافة واجب يدويا'
+                          : 'إضافة واجب من الخطة الأسبوعية'),
+                  style: currTextStyle,
+                ),
+              content: SizedBox(
+                width: 520,
+                child: Form(
+                  key: formKey,
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (!isManualMode && !isEdit) ...[
+                          LovFieldWidget(
+                            label: 'الخطة الأسبوعية',
+                            enabled: weeklyPlanOptions.isNotEmpty,
+                            valueText: selectedWeeklyPlanOption?.lovLabel ?? '',
+                            options: weeklyPlanOptions,
+                            isMandatory: true,
+                            headers: const [
+                              {
+                                "col_field1": "KEY",
+                                "col_header1": "KEY",
+                                "col_width": "1",
+                                "affected_col": "",
+                                "list_title": "قائمة الخطط الأسبوعية",
+                              },
+                              {
+                                "col_field1": "ID",
+                                "col_header1": "التاريخ",
+                                "col_width": "140",
+                                "affected_col": "",
+                                "list_title": "قائمة الخطط الأسبوعية",
+                              },
+                              {
+                                "col_field1": "addedValue2",
+                                "col_header1": "الوحدة",
+                                "col_width": "120",
+                                "affected_col": "",
+                                "list_title": "قائمة الخطط الأسبوعية",
+                              },
+                              {
+                                "col_field1": "addedValue3",
+                                "col_header1": "الدرس",
+                                "col_width": "120",
+                                "affected_col": "",
+                                "list_title": "قائمة الخطط الأسبوعية",
+                              },
+                              {
+                                "col_field1": "addedValue4",
+                                "col_header1": "الواجب",
+                                "col_width": "300",
+                                "affected_col": "",
+                                "list_title": "قائمة الخطط الأسبوعية",
+                              },
+                            ],
+                            title: 'قائمة الخطط الأسبوعية',
+                            hintText: weeklyPlanOptions.isEmpty
+                                ? 'لا يوجد خطط أسبوعية'
+                                : 'اختر الخطة الأسبوعية',
+                            onChanged: (picked) {
+                              if (picked == null) return;
+                              setLocalState(() {
+                                selectedWeeklyPlanOption = picked;
+                                final match = _plnWeeklyPlanList.firstWhere(
+                                  (p) =>
+                                      (p.weeklyPlanSeq?.newValue ?? '')
+                                          .toString()
+                                          .trim() ==
+                                      picked.hiddenKey.trim(),
+                                  orElse: () => PlnWeeklyPlan(),
+                                );
+                                selectedWeeklyPlan = match
+                                            .weeklyPlanSeq?.newValue
+                                            ?.toString()
+                                            .trim()
+                                            .isNotEmpty ==
+                                        true
+                                    ? match
+                                    : null;
+
+                                final dayDate = picked.lovId ?? '';
+                                final unitId =
+                                    (selectedWeeklyPlan?.unitId?.newValue ?? '')
+                                        .toString();
+                                final lessonId =
+                                    (selectedWeeklyPlan?.lessonId?.newValue ??
+                                            '')
+                                        .toString();
+                                final taskDetails = (selectedWeeklyPlan
+                                            ?.taskDetails?.newValue ??
+                                        picked.addedValue4 ??
+                                        '')
+                                    .toString();
+
+                                if (dayDate.trim().isNotEmpty) {
+                                  initDateCtrl.text = dayDate.trim();
+                                }
+                                if (taskDetails.trim().isNotEmpty) {
+                                  taskDetailCtrl.text = taskDetails.trim();
+                                }
+
+                                unitIdCtrl.text = unitId.trim();
+                                lessonIdCtrl.text = lessonId.trim();
+
+                                selectedUnit = _unitOptions.firstWhere(
+                                  (o) => o.hiddenKey.trim() == unitId.trim(),
+                                  orElse: () => const Option(
+                                    hiddenKey: '',
+                                    lovLabel: '',
+                                  ),
+                                );
+                                if (selectedUnit?.hiddenKey.trim().isEmpty ==
+                                    true) {
+                                  selectedUnit = null;
+                                }
+
+                                if (selectedUnit != null) {
+                                  final unitLessons = _lessonOptions
+                                      .where((o) =>
+                                          o.addedValue2 ==
+                                          selectedUnit!.hiddenKey)
+                                      .toList();
+                                  selectedLesson = unitLessons.firstWhere(
+                                    (o) =>
+                                        o.hiddenKey.trim() == lessonId.trim(),
+                                    orElse: () => const Option(
+                                      hiddenKey: '',
+                                      lovLabel: '',
+                                    ),
+                                  );
+                                  if (selectedLesson?.hiddenKey
+                                          .trim()
+                                          .isEmpty ==
+                                      true) {
+                                    selectedLesson = null;
+                                  }
+                                } else {
+                                  selectedLesson = null;
+                                }
+                              });
+                            },
+                          ),
+                          const SizedBox(height: 12),
+                        ],
+                        TextFormField(
+                          controller: initDateCtrl,
+                          enabled: !lockWeeklyPlanFields,
+                          readOnly: true,
+                          decoration: InputDecoration(
+                            labelText: 'تاريخ البداية',
+                            labelStyle: currTextStyle?.copyWith(
+                              color: Colors.red,
+                            ),
+                            suffixIcon: (!isManualMode && !isEdit) ||
+                                    lockWeeklyPlanFields ||
+                                    (isEdit &&
+                                        (item?.weeklyPlanSeq?.newValue ?? '')
+                                            .toString()
+                                            .trim()
+                                            .isNotEmpty)
+                                ? null
+                                : IconButton(
+                                    onPressed: () => _pickDateForDialog(
+                                        initDateCtrl, shouldDateCtrl,
+                                        isInitDate: true),
+                                    icon: const Icon(Icons.date_range),
+                                  ),
+                          ),
+                          validator: (v) => (v == null || v.trim().isEmpty)
+                              ? tRequired
+                              : null,
+                          onTap: (!isManualMode && !isEdit) ||
+                                  lockWeeklyPlanFields ||
+                                  (isEdit &&
+                                      (item?.weeklyPlanSeq?.newValue ?? '')
+                                          .toString()
+                                          .trim()
+                                          .isNotEmpty)
+                              ? null
+                              : () => _pickDateForDialog(
+                                  initDateCtrl, shouldDateCtrl,
+                                  isInitDate: true),
+                        ),
+                        const SizedBox(height: 12),
+                        TextFormField(
+                          controller: shouldDateCtrl,
+                          enabled: !lockWeeklyPlanFields,
+                          readOnly: true,
+                          decoration: InputDecoration(
+                            labelText: 'تاريخ التسليم',
+                            labelStyle: currTextStyle?.copyWith(
+                              color: Colors.red,
+                            ),
+                            suffixIcon: lockWeeklyPlanFields
+                                ? null
+                                : IconButton(
+                                    onPressed: () => _pickDateForDialog(
+                                        shouldDateCtrl, initDateCtrl,
+                                        isInitDate: false),
+                                    icon: const Icon(Icons.date_range),
+                                  ),
+                          ),
+                          validator: (v) => (v == null || v.trim().isEmpty)
+                              ? tRequired
+                              : null,
+                          onTap: lockWeeklyPlanFields
+                              ? null
+                              : () => _pickDateForDialog(
+                                  shouldDateCtrl, initDateCtrl,
+                                  isInitDate: false),
+                        ),
+                        const SizedBox(height: 12),
+                        if (isManualMode) ...[
+                          TextFormField(
+                            controller: unitDescCtrl,
+                            enabled: !lockWeeklyPlanFields,
+                            decoration: InputDecoration(
+                              labelText: 'الوحدة (نص)',
+                              labelStyle: currTextStyle?.copyWith(
+                                color: Colors.red,
+                              ),
+                            ),
+                            validator: (v) => (v == null || v.trim().isEmpty)
+                                ? tRequired
+                                : null,
+                          ),
+                          const SizedBox(height: 12),
+                          TextFormField(
+                            controller: lessonDescCtrl,
+                            enabled: !lockWeeklyPlanFields,
+                            decoration: InputDecoration(
+                              labelText: 'الدرس (نص)',
+                              labelStyle: currTextStyle?.copyWith(
+                                color: Colors.red,
+                              ),
+                            ),
+                            validator: (v) => (v == null || v.trim().isEmpty)
+                                ? tRequired
+                                : null,
+                          ),
+                        ] else ...[
+                          LovFieldWidget(
+                            label: 'الوحدة',
+                            enabled: !lockWeeklyPlanFields,
+                            valueText: selectedUnit?.lovLabel ?? '',
+                            options: _unitOptions,
+                            headers: [
+                              {
+                                "col_field1": "KEY",
+                                "col_header1": 'الرمز',
+                                "col_width": "120",
+                                "affected_col": "id",
+                                "list_title": 'قائمة الوحدات',
+                              },
+                              {
+                                "col_field2": "LABEL",
+                                "col_header2": 'الوحدة',
+                                "col_width": "300",
+                                "affected_col": "label",
+                              },
+                            ],
+                            title: 'قائمة الوحدات',
+                            isMandatory: true,
+                            hintText: 'اختر الوحدة',
+                            onChanged: (picked) {
+                              if (picked == null) return;
+                              setLocalState(() {
+                                selectedUnit = picked;
+                                unitIdCtrl.text = picked.hiddenKey;
+                                selectedLesson = null;
+                                lessonIdCtrl.clear();
+                              });
+                            },
+                          ),
+                          const SizedBox(height: 12),
+                          LovFieldWidget(
+                            label: 'الدرس',
+                            enabled:
+                                !lockWeeklyPlanFields && selectedUnit != null,
+                            valueText: selectedLesson?.lovLabel ?? '',
+                            options: selectedUnit == null
+                                ? []
+                                : _lessonOptions
+                                    .where((o) =>
+                                        o.addedValue2 ==
+                                        selectedUnit!.hiddenKey)
+                                    .toList(),
+                            headers: [
+                              {
+                                "col_field1": "KEY",
+                                "col_header1": 'الرمز',
+                                "col_width": "120",
+                                "affected_col": "id",
+                                "list_title": 'قائمة الدروس',
+                              },
+                              {
+                                "col_field2": "LABEL",
+                                "col_header2": 'الدرس',
+                                "col_width": "300",
+                                "affected_col": "label",
+                              },
+                            ],
+                            title: 'قائمة الدروس',
+                            isMandatory: true,
+                            hintText: selectedUnit == null
+                                ? 'اختر الوحدة أولاً'
+                                : 'اختر الدرس',
+                            onChanged: (picked) {
+                              if (picked == null) return;
+                              setLocalState(() {
+                                selectedLesson = picked;
+                                lessonIdCtrl.text = picked.hiddenKey;
+                              });
+                            },
+                          ),
+                        ],
+                        const SizedBox(height: 12),
+                        TextFormField(
+                          controller: taskDetailCtrl,
+                          maxLines: 5,
+                          enabled: !lockWeeklyPlanFields,
+                          decoration: InputDecoration(
+                            labelText: 'تفاصيل الواجب',
+                            labelStyle: currTextStyle?.copyWith(
+                              color: Colors.red,
+                            ),
+                          ),
+                          validator: (v) => (v == null || v.trim().isEmpty)
+                              ? tRequired
+                              : null,
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              actions: [
+                ElevatedButton(
+                  onPressed: () async {
+                    if (!formKey.currentState!.validate()) return;
+                    if (!isManualMode &&
+                        (selectedUnit == null || selectedLesson == null)) {
+                      GenUtils.showAlertDialog(
+                        message: 'يرجى اختيار الوحدة والدرس',
+                        title: genAlertTitle,
+                        popAfter: '0',
+                        context: context,
+                      );
+                      return;
+                    }
+                    if (!isManualMode &&
+                        !isEdit &&
+                        selectedWeeklyPlan != null) {
+                      final wpSeq =
+                          (selectedWeeklyPlan?.weeklyPlanSeq?.newValue ?? '')
+                              .toString()
+                              .trim();
+                      if (wpSeq.isNotEmpty &&
+                          _hmwHomeWorkMas.any((m) {
+                            final existingSeq =
+                                (m.weeklyPlanSeq?.newValue ?? '')
+                                    .toString()
+                                    .trim();
+                            return existingSeq == wpSeq &&
+                                m.operationType != 'delete';
+                          })) {
+                        GenUtils.showAlertDialog(
+                          message: 'هذا الواجب مضاف مسبقاً',
+                          title: genAlertTitle,
+                          popAfter: '0',
+                          context: context,
+                        );
+                        return;
+                      }
+                    }
+
+                    final HmwHomeWorkMas newItem = HmwHomeWorkMas();
+
+                    newItem.studyYear?.newValue =
+                        SecUserFileStatic.webCurrentYear;
+                    newItem.studyYear?.oldValue =
+                        SecUserFileStatic.webCurrentYear;
+
+                    // Use the current semester from header (auto-selected based on today's date)
+                    // For edit mode, fallback to the item's existing semester
+                    final semValue = _semesterIdController.text
+                            .trim()
+                            .isNotEmpty
+                        ? _semesterIdController.text.trim()
+                        : (item?.semesterId?.newValue ?? '').toString().trim();
+
+                    if (semValue.isEmpty) {
+                      GenUtils.showAlertDialog(
+                        message: 'لم يتم تحديد الفصل الدراسي',
+                        title: genErrorTitle,
+                        popAfter: '0',
+                        context: context,
+                      );
+                      return;
+                    }
+                    newItem.semesterId?.newValue = semValue;
+                    newItem.semesterId?.oldValue = semValue;
+
+                    newItem.classId?.newValue = _classIdController.text;
+                    newItem.classId?.oldValue = _classIdController.text;
+
+                    newItem.branchId?.newValue = _branchIdController.text;
+                    newItem.branchId?.oldValue = _branchIdController.text;
+
+                    newItem.subjectId?.newValue = _subjectIdController.text;
+                    newItem.subjectId?.oldValue = _subjectIdController.text;
+
+                    newItem.schoolId?.newValue = _schoolIdController.text;
+                    newItem.schoolId?.oldValue = _schoolIdController.text;
+
+                    newItem.sectionId?.newValue = _sectionIdController.text;
+                    newItem.sectionId?.oldValue = _sectionIdController.text;
+
+                    newItem.teacherId?.newValue =
+                        SecUserFileStatic.empId.toString();
+                    newItem.teacherId?.oldValue =
+                        SecUserFileStatic.empId.toString();
+
+                    if (isEdit) {
+                      newItem.homeWorkSeq?.newValue =
+                          item!.homeWorkSeq?.newValue;
+                      newItem.homeWorkSeq?.oldValue =
+                          item.homeWorkSeq?.oldValue;
+                      newItem.weeklyPlanSeq?.newValue =
+                          item.weeklyPlanSeq?.newValue;
+                      newItem.weeklyPlanSeq?.oldValue =
+                          item.weeklyPlanSeq?.oldValue;
+                    } else {
+                      newItem.homeWorkSeq?.newValue = '';
+                      newItem.homeWorkSeq?.oldValue = '';
+                      newItem.weeklyPlanSeq?.newValue =
+                          selectedWeeklyPlan?.weeklyPlanSeq?.newValue ?? '';
+                      newItem.weeklyPlanSeq?.oldValue =
+                          selectedWeeklyPlan?.weeklyPlanSeq?.oldValue ??
+                              newItem.weeklyPlanSeq?.newValue ??
+                              '';
+                    }
+
+                    newItem.initDate?.newValue = initDateCtrl.text;
+                    newItem.initDate?.oldValue = initDateCtrl.text;
+
+                    newItem.shouldDate?.newValue = shouldDateCtrl.text;
+                    newItem.shouldDate?.oldValue = shouldDateCtrl.text;
+
+                    if (isManualMode) {
+                      final unitDescText = unitDescCtrl.text.trim();
+                      final lessonDescText = lessonDescCtrl.text.trim();
+                      final unitIdValue = unitIdCtrl.text.trim().isNotEmpty
+                          ? unitIdCtrl.text.trim()
+                          : '';
+                      final lessonIdValue = lessonIdCtrl.text.trim().isNotEmpty
+                          ? lessonIdCtrl.text.trim()
+                          : '';
+
+                      newItem.unitId?.newValue = unitIdValue;
+                      newItem.unitId?.oldValue = unitIdValue;
+                      newItem.lessonId?.newValue = lessonIdValue;
+                      newItem.lessonId?.oldValue = lessonIdValue;
+
+                      newItem.unitDesc?.newValue = unitDescText;
+                      newItem.unitDesc?.oldValue = unitDescText;
+                      newItem.lessonDesc?.newValue = lessonDescText;
+                      newItem.lessonDesc?.oldValue = lessonDescText;
+
+                      newItem.unitIdDesc?.newValue = unitDescText;
+                      newItem.unitIdDesc?.oldValue = unitDescText;
+                      newItem.lessonIdDesc?.newValue = lessonDescText;
+                      newItem.lessonIdDesc?.oldValue = lessonDescText;
+                    } else {
+                      newItem.unitId?.newValue = unitIdCtrl.text;
+                      newItem.unitId?.oldValue = unitIdCtrl.text;
+
+                      newItem.lessonId?.newValue = lessonIdCtrl.text;
+                      newItem.lessonId?.oldValue = lessonIdCtrl.text;
+
+                      final unitLabel = selectedUnit?.lovLabel ?? '';
+                      final lessonLabel = selectedLesson?.lovLabel ?? '';
+                      if (unitLabel.isNotEmpty) {
+                        newItem.unitIdDesc?.newValue = unitLabel;
+                        newItem.unitIdDesc?.oldValue = unitLabel;
+                      }
+                      if (lessonLabel.isNotEmpty) {
+                        newItem.lessonIdDesc?.newValue = lessonLabel;
+                        newItem.lessonIdDesc?.oldValue = lessonLabel;
+                      }
+                    }
+
+                    newItem.taskDetail?.newValue = taskDetailCtrl.text;
+                    newItem.taskDetail?.oldValue = taskDetailCtrl.text;
+
+                    newItem.companyId?.newValue = '1';
+                    newItem.companyId?.oldValue = '1';
+
+                    newItem.userCreate?.newValue = SecUserFileStatic.userSeq;
+                    newItem.userCreate?.oldValue = SecUserFileStatic.userSeq;
+
+                    newItem.pcNameCreate?.newValue =
+                        (HardwareUtils.deviceMAC)?.substring(0, 19) ?? '1';
+                    newItem.pcNameCreate?.oldValue =
+                        (HardwareUtils.deviceMAC)?.substring(0, 19) ?? '1';
+
+                    newItem.ipCreate?.newValue = '127.0.0.1';
+                    newItem.ipCreate?.oldValue = '127.0.0.1';
+
+                    newItem.userModify?.newValue = SecUserFileStatic.userSeq;
+                    newItem.userModify?.oldValue = SecUserFileStatic.userSeq;
+
+                    newItem.pcNameModify?.newValue =
+                        (HardwareUtils.deviceMAC)?.substring(0, 19) ?? '1';
+                    newItem.pcNameModify?.oldValue =
+                        (HardwareUtils.deviceMAC)?.substring(0, 19) ?? '1';
+
+                    newItem.subjectIdDesc?.newValue =
+                        _classSubject?.addedValue2 ??
+                            _classSubject?.lovLabel ??
+                            '';
+                    newItem.subjectIdDesc?.oldValue =
+                        _classSubject?.addedValue2 ??
+                            _classSubject?.lovLabel ??
+                            '';
+
+                    newItem.operationType = operationType;
+
+                    setState(() {
+                      if (isEdit) {
+                        final idx = _hmwHomeWorkMasFiltered.indexOf(item!);
+                        if (idx != -1) _hmwHomeWorkMasFiltered[idx] = newItem;
+                      } else {
+                        _hmwHomeWorkMasFiltered.insert(0, newItem);
+                        _hmwHomeWorkMas.insert(0, newItem);
+                      }
+                    });
+
+                    Navigator.pop(context);
+                    await updHmwHomeWorkMas(showEmptyAlert: false);
+
+                    // After saving a new homework, refresh and filter to show only homeworks for current subject
+                    if (!isEdit) {
+                      await searchData();
+                    }
+                  },
+                  child: Text(tSave),
+                ),
+                TextButton(
+                  onPressed: () => Navigator.pop(context),
+                  child: const Text(tExit),
+                ),
+              ],
+              );
+            },
+          ),
+        ),
+    );
+  }
+
+  void deleteMasItem(HmwHomeWorkMas item) {
+    showDialog(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          title: Text(tConfirmDelete),
+          content: Text('$tAreYouSureDelete هذا الواجب؟'),
+          actions: [
+            ElevatedButton(
+              onPressed: () async {
+                setState(() {
+                  item.operationType = 'delete';
+                });
+                Navigator.pop(ctx);
+                await updHmwHomeWorkMas(showEmptyAlert: false);
+
+                // Remove from local lists immediately after save
+                setState(() {
+                  _hmwHomeWorkMasFiltered.removeWhere((m) => m == item);
+                  _hmwHomeWorkMas.removeWhere((m) => m == item);
+                  if (_selectedMas == item) {
+                    _selectedMas = null;
+                    _hmwHomeWorkDtlFiltered = [];
+                    _selectedDtl = null;
+                  }
+                });
+              },
+              child: Text(tDeleteRecord,
+                  style: currTextStyle),
+            ),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text(tExit)),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void deleteDtlItem(HmwHomeWorkDtl item) {
+    showDialog(
+      context: context,
+      builder: (ctx) => Directionality(
+        textDirection: TextDirection.rtl,
+        child: AlertDialog(
+          title: Text(tConfirmDelete),
+          content: Text('$tAreYouSureDelete هذا الطالب؟'),
+          actions: [
+            ElevatedButton(
+             
+              onPressed: () async {
+                setState(() {
+                  item.operationType = 'delete';
+                  item.userModify?.newValue = SecUserFileStatic.userSeq;
+                  item.userModify?.oldValue = SecUserFileStatic.userSeq;
+                  item.pcNameModify?.newValue =
+                      (HardwareUtils.deviceMAC)?.substring(0, 19) ?? '1';
+                  item.pcNameModify?.oldValue =
+                      (HardwareUtils.deviceMAC)?.substring(0, 19) ?? '1';
+                  item.ipModify?.newValue = (SecUserFileStatic.ipModify ?? '1');
+                  item.ipModify?.oldValue = (SecUserFileStatic.ipModify ?? '1');
+                });
+                Navigator.pop(ctx);
+                await updHmwHomeWorkDtl(showEmptyAlert: false);
+
+                final familyId =
+                    (item.familyId?.newValue ?? '').toString().trim();
+                final studentId =
+                    (item.studentId?.newValue ?? '').toString().trim();
+                final ats = '$familyId$studentId';
+                final studentLabel =
+                    (item.studentIdDesc?.newValue ?? '').toString();
+
+                setState(() {
+                  _hmwHomeWorkDtlFiltered.removeWhere((d) => d == item);
+                  _hmwHomeWorkDtl.removeWhere((d) => d == item);
+                  if (_selectedDtl == item) {
+                    _selectedDtl = null;
+                  }
+                  if (ats.isNotEmpty &&
+                      !_studentOptions
+                          .any((o) => o.hiddenKey.toString() == ats)) {
+                    _studentOptions.add(Option(
+                      hiddenKey: ats,
+                      lovId: studentId,
+                      lovLabel: studentLabel,
+                    ));
+                  }
+                });
+              },
+              child: Text(tDeleteRecord,
+                  style: currTextStyle),
+            ),
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text(tExit),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget header(BuildContext context) {
+    final fields = <Widget>[
+      LovFieldWidget(
+        label: 'الصف والمادة',
+        enabled: true,
+        valueText: _classSubject?.lovLabel ?? '',
+        options: _classSubjectOptions,
+        headers: [
+          {
+            "col_field1": "KEY",
+            "col_header1": 'الرمز',
+            "col_width": "150",
+            "affected_col": "id",
+            "list_title": 'قائمة الصف والمادة',
+          },
+          {
+            "col_field2": "LABEL",
+            "col_header2": 'الصف والمادة',
+            "col_width": "280",
+            "affected_col": "label",
+          },
+        ],
+        title: 'قائمة الصف والمادة',
+        isMandatory: true,
+        hintText: 'اختر الصف والمادة',
+        onChanged: (picked) {
+          if (picked == null) return;
+          final classCode = picked.hiddenKey.trim();
+          if (classCode.length < 12) {
+            GenUtils.showAlertDialog(
+              message: 'رمز الصف والمادة غير صالح',
+              title: genErrorTitle,
+              popAfter: '0',
+              context: context,
+            );
+            return;
+          }
+          setState(() {
+            _classSubject = picked;
+            _schoolIdController.text = classCode.substring(0, 2);
+            _classIdController.text = classCode.substring(2, 4);
+            _branchIdController.text = classCode.substring(4, 6);
+            _sectionIdController.text = classCode.substring(6, 8);
+            _subjectIdController.text = classCode.substring(8, 12);
+            _unitLovKey = '';
+            _unitOptions.clear();
+            _lessonOptions.clear();
+            _studentOptions.clear();
+            loadingStudentsLov = false;
+          });
+        },
+      ),
+      TextFormField(
+        controller: _fromShouldDateCtrl,
+        readOnly: true,
+        decoration: InputDecoration(
+          labelText: 'من تاريخ التسليم',
+          suffixIcon: IconButton(
+            onPressed: () => _pickDate(_fromShouldDateCtrl),
+            icon: const Icon(Icons.date_range),
+          ),
+        ),
+        onTap: () => _pickDate(_fromShouldDateCtrl),
+      ),
+      TextFormField(
+        controller: _toShouldDateCtrl,
+        readOnly: true,
+        decoration: InputDecoration(
+          labelText: 'إلى تاريخ التسليم',
+          suffixIcon: IconButton(
+            onPressed: () => _pickDate(_toShouldDateCtrl),
+            icon: const Icon(Icons.date_range),
+          ),
+        ),
+        onTap: () => _pickDate(_toShouldDateCtrl),
+      ),
+      ElevatedButton(
+        style: ElevatedButton.styleFrom(
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+          elevation: 3.0,
+        ),
+        onPressed: _classSubject != null
+            ? () {
+                searchData();
+              }
+            : null,
+        child: Text(
+          'إحضار الواجبات',
+          style: currTextStyle,
+          textAlign: TextAlign.center,
+        ),
+      ),
+    ];
+
+    return Card(
+      elevation: 0,
+      child: Padding(
+        padding: const EdgeInsets.all(12),
+        child: LayoutBuilder(
+          builder: (context, constraints) {
+            const perTile = 260.0;
+            final cols = (constraints.maxWidth ~/ perTile).clamp(1, 5);
+            return GridView.count(
+              crossAxisCount: cols,
+              childAspectRatio: 5,
+              mainAxisSpacing: 8,
+              crossAxisSpacing: 12,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              children: fields,
+            );
+          },
+        ),
+      ),
+    );
+  }
+
+  Future<void> _pickDateForDialog(
+    TextEditingController ctrl,
+    TextEditingController otherDateCtrl, {
+    bool isInitDate = true,
+  }) async {
+    final now = DateTime.now();
+
+    // Use semester date range if available
+    DateTime firstDate = DateTime(now.year - 3);
+    DateTime lastDate = DateTime(now.year + 3);
+
+    if (_semesterFromDate.isNotEmpty) {
+      try {
+        firstDate = DateTime.parse(_semesterFromDate);
+      } catch (e) {
+        // Fallback to default date range if parsing fails
+      }
+    }
+
+    if (_semesterToDate.isNotEmpty) {
+      try {
+        lastDate = DateTime.parse(_semesterToDate);
+      } catch (e) {
+        // Fallback to default date range if parsing fails
+      }
+    }
+
+    // Ensure initialDate is within the valid range
+    DateTime initialDate = now;
+    if (now.isBefore(firstDate)) {
+      initialDate = firstDate;
+    } else if (now.isAfter(lastDate)) {
+      initialDate = lastDate;
+    }
+
+    // Build selectableDayPredicate based on which date is being edited
+    // initDate <= shouldDate
+    bool Function(DateTime)? selectableDayPredicate;
+    final otherDateStr = otherDateCtrl.text.trim();
+
+    if (otherDateStr.isNotEmpty) {
+      try {
+        final otherDate = DateTime.parse(otherDateStr);
+        if (isInitDate) {
+          // Editing initDate - disable dates after shouldDate
+          selectableDayPredicate = (DateTime day) {
+            return day.isBefore(otherDate) || day.isAtSameMomentAs(otherDate);
+          };
+          // Ensure initialDate is valid for this constraint
+          if (initialDate.isAfter(otherDate)) {
+            initialDate = otherDate;
+          }
+        } else {
+          // Editing shouldDate - disable dates before initDate
+          selectableDayPredicate = (DateTime day) {
+            return day.isAfter(otherDate) || day.isAtSameMomentAs(otherDate);
+          };
+          // Ensure initialDate is valid for this constraint
+          if (initialDate.isBefore(otherDate)) {
+            initialDate = otherDate;
+          }
+        }
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initialDate,
+      firstDate: firstDate,
+      lastDate: lastDate,
+      selectableDayPredicate: selectableDayPredicate,
+    );
+    if (picked == null) return;
+
+    final yyyy = picked.year.toString().padLeft(4, '0');
+    final mm = picked.month.toString().padLeft(2, '0');
+    final dd = picked.day.toString().padLeft(2, '0');
+
+    ctrl.text = '$yyyy-$mm-$dd';
+  }
+
+  Future<void> _pickDate(TextEditingController ctrl) async {
+    final now = DateTime.now();
+
+    // Use semester date range if available
+    DateTime firstDate = DateTime(now.year - 3);
+    DateTime lastDate = DateTime(now.year + 3);
+
+    if (_semesterFromDate.isNotEmpty) {
+      try {
+        firstDate = DateTime.parse(_semesterFromDate);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    if (_semesterToDate.isNotEmpty) {
+      try {
+        lastDate = DateTime.parse(_semesterToDate);
+      } catch (e) {
+        // ignore
+      }
+    }
+
+    // Ensure initialDate is within the valid range
+    DateTime initialDate = now;
+    if (now.isBefore(firstDate)) {
+      initialDate = firstDate;
+    } else if (now.isAfter(lastDate)) {
+      initialDate = lastDate;
+    }
+
+    // Build selectableDayPredicate based on which date picker is being used
+    bool Function(DateTime)? selectableDayPredicate;
+
+    if (identical(ctrl, _toShouldDateCtrl)) {
+      // Disable dates before the from date
+      final fromDateStr = _fromShouldDateCtrl.text.trim();
+      if (fromDateStr.isNotEmpty) {
+        try {
+          final fromDate = DateTime.parse(fromDateStr);
+          selectableDayPredicate = (DateTime day) {
+            return day.isAfter(fromDate) || day.isAtSameMomentAs(fromDate);
+          };
+        } catch (e) {
+          // ignore
+        }
+      }
+    } else if (identical(ctrl, _fromShouldDateCtrl)) {
+      // Disable dates after the to date
+      final toDateStr = _toShouldDateCtrl.text.trim();
+      if (toDateStr.isNotEmpty) {
+        try {
+          final toDate = DateTime.parse(toDateStr);
+          selectableDayPredicate = (DateTime day) {
+            return day.isBefore(toDate) || day.isAtSameMomentAs(toDate);
+          };
+        } catch (e) {
+          // ignore
+        }
+      }
+    }
+
+    final picked = await showDatePicker(
+      context: context,
+      initialDate: initialDate,
+      firstDate: firstDate,
+      lastDate: lastDate,
+      selectableDayPredicate: selectableDayPredicate,
+    );
+    if (picked == null) return;
+
+    final yyyy = picked.year.toString().padLeft(4, '0');
+    final mm = picked.month.toString().padLeft(2, '0');
+    final dd = picked.day.toString().padLeft(2, '0');
+
+    setState(() => ctrl.text = '$yyyy-$mm-$dd');
+    if (!mounted) return;
+
+    // Save current semester before clearing (semester is determined by today's date, not the selected dates)
+    final currentSemesterId = _semesterIdController.text.trim();
+
+    setState(() {
+      _classSubject = null;
+      _schoolIdController.clear();
+      // Don't clear semester - it's determined by today's date, not selected dates
+      _classIdController.clear();
+      _branchIdController.clear();
+      _sectionIdController.clear();
+      _subjectIdController.clear();
+      _unitLovKey = '';
+      _unitOptions.clear();
+      _lessonOptions.clear();
+      _studentOptions.clear();
+      loadingStudentsLov = false;
+      _hmwHomeWorkMasFiltered.clear();
+      _hmwHomeWorkDtlFiltered.clear();
+      _hmwHomeWorkDtl.clear();
+      _selectedMas = null;
+      _selectedDtl = null;
+
+      // Restore the semester
+      if (currentSemesterId.isNotEmpty) {
+        _semesterIdController.text = currentSemesterId;
+      }
+    });
+
+    if (_fromShouldDateCtrl.text.trim().isEmpty ||
+        _toShouldDateCtrl.text.trim().isEmpty) {
+      return;
+    }
+
+    // Just update the UI state, don't call the API
+    setState(() {
+      _hmwHomeWorkMasFiltered.clear();
+      _hmwHomeWorkDtlFiltered.clear();
+      _hmwHomeWorkDtl.clear();
+      _selectedMas = null;
+      _selectedDtl = null;
+    });
+  }
+
+  Future<void> exportToExcel() async {
+    if (_selectedMas == null) {
+      GenUtils.showAlertDialog(
+        context: context,
+        title: genAlertTitle,
+        message: 'يجب اختيار واجب أولاً',
+        popAfter: '0',
+      );
+      return;
+    }
+
+    final List<ExcelDataRow> rows = <ExcelDataRow>[];
+
+    if (_hmwHomeWorkDtlFiltered.isEmpty) {
+      rows.add(ExcelDataRow(cells: <ExcelDataCell>[
+        ExcelDataCell(
+            columnHeader: 'رقم الواجب',
+            value: (_selectedMas!.homeWorkSeq?.newValue ?? '').toString()),
+        ExcelDataCell(
+            columnHeader: 'التاريخ المطلوب',
+            value: (_selectedMas!.shouldDate?.newValue ?? '').toString()),
+        ExcelDataCell(
+            columnHeader: 'المادة',
+            value: (_selectedMas!.subjectIdDesc?.newValue ?? '').toString()),
+        ExcelDataCell(
+            columnHeader: 'تفاصيل الواجب',
+            value: (_selectedMas!.taskDetail?.newValue ?? '').toString()),
+        ExcelDataCell(columnHeader: 'رقم الطالب', value: ''),
+        ExcelDataCell(columnHeader: 'الطالب', value: ''),
+        ExcelDataCell(columnHeader: 'الحالة', value: ''),
+        ExcelDataCell(columnHeader: 'ملاحظات', value: ''),
+      ]));
+    } else {
+      for (final d in _hmwHomeWorkDtlFiltered) {
+        rows.add(ExcelDataRow(cells: <ExcelDataCell>[
+          ExcelDataCell(
+              columnHeader: 'رقم الواجب',
+              value: (_selectedMas!.homeWorkSeq?.newValue ?? '').toString()),
+          ExcelDataCell(
+              columnHeader: 'التاريخ المطلوب',
+              value: (_selectedMas!.shouldDate?.newValue ?? '').toString()),
+          ExcelDataCell(
+              columnHeader: 'المادة',
+              value: (_selectedMas!.subjectIdDesc?.newValue ?? '').toString()),
+          ExcelDataCell(
+              columnHeader: 'تفاصيل الواجب',
+              value: (_selectedMas!.taskDetail?.newValue ?? '').toString()),
+          ExcelDataCell(
+              columnHeader: 'رقم الطالب',
+              value: (() {
+                final familyId = (d.familyId?.newValue ?? '').toString().trim();
+                final studentId =
+                    (d.studentId?.newValue ?? '').toString().trim();
+                return '$familyId$studentId';
+              })()),
+          ExcelDataCell(
+              columnHeader: 'الطالب',
+              value: (d.studentIdDesc?.newValue ?? '').toString()),
+          ExcelDataCell(
+            columnHeader: 'الحالة',
+            value: (() {
+              final status = (d.transStatus?.newValue ?? '').toString().trim();
+              if (status == '2') return 'غير منجز';
+              if (status == '3') return 'منجز جزئياً';
+              return status;
+            })(),
+          ),
+          ExcelDataCell(
+              columnHeader: 'ملاحظات',
+              value: (d.notes?.newValue ?? '').toString()),
+        ]));
+      }
+    }
+
+    final Workbook workbook = Workbook();
+    final Worksheet sheet = workbook.worksheets[0];
+
+    sheet.importData(rows, 1, 1);
+    sheet.getRangeByName('A1:Z1').autoFitColumns();
+
+    final List<int> bytes = workbook.saveAsStream();
+    workbook.dispose();
+
+    final platSave = PlatSave(bytes);
+    platSave.platSave();
+  }
+}
